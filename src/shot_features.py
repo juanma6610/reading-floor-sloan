@@ -66,9 +66,7 @@ class ShotFeatureExtractor:
             self.game.pbp.loc[shots.index, 'PRE_PLAY_MARGIN'] * -1
         )
 
-        pattern = r"(?i)(dunk|alley[-\s]?oop|tip[-\s]?(in|layup))"
         combined_desc = shots["HOMEDESCRIPTION"].fillna("") + " " + shots["VISITORDESCRIPTION"].fillna("")
-        shots["is_dunk_or_tip"] = combined_desc.str.contains(pattern, regex=True).astype(int)
         shots["description"] = combined_desc.str.strip().str.replace("'", " ").str.replace('"', ' ').str.replace('\n', ' ').str.replace('\r', ' ')
 
         shot_events = pd.DataFrame({
@@ -78,7 +76,6 @@ class ShotFeatureExtractor:
             'made': (shots['EVENTMSGTYPE'] == 1).astype(int),
             'quarter': shots['PERIOD'],
             'score_margin': adjusted_margins.astype(int),
-            "is_dunk_or_tip": shots["is_dunk_or_tip"],
             "description": shots['description']
         })
         
@@ -469,7 +466,6 @@ class ShotFeatureExtractor:
             'shooter_perp_acc': shooter_perp_acc,
             'def_par_acc': def_par_acc,
             'def_perp_acc': def_perp_acc,
-            "is_dunk_or_tip": shot["is_dunk_or_tip"],
             'time_to_contest': time_to_contest,
             'ratio_off_def_hull': ratio_off_def_hull,
             'touch_time': touch_time,                 

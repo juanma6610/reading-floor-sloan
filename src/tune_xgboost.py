@@ -34,7 +34,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from train_xgboost import RANDOM_STATE, group_split, load_data
+from train_xgboost import DATA_PATH, RANDOM_STATE, TEST_SIZE, VAL_SIZE, group_split, load_data
 
 
 # ------------------------------------------------------------
@@ -142,7 +142,7 @@ def fit_final_model(best, X_trainval, y_trainval, g_trainval, X_test, y_test):
     """
     X_train, X_val, y_train, y_val, _, _ = group_split(
         X_trainval, y_trainval, g_trainval,
-        test_size=0.15, random_state=RANDOM_STATE,
+        test_size=VAL_SIZE, random_state=RANDOM_STATE,
     )
     budget = max(int(best['n_trees'] * 1.5), 200)
 
@@ -174,7 +174,7 @@ def fit_final_model(best, X_trainval, y_trainval, g_trainval, X_test, y_test):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv', default='data/shot_features_valid2.csv')
+    parser.add_argument('--csv', default=DATA_PATH)
     parser.add_argument('--n-iter', type=int, default=DEFAULT_N_ITER)
     parser.add_argument('--out-dir', default='results')
     parser.add_argument('--model-out', default='data/xgb_shot_model_tuned.json')
@@ -186,7 +186,7 @@ def main():
     print("Splitting test set out (game-disjoint, untouched until the final eval)...")
     X, y, groups, feature_cols = load_data(args.csv)
     X_trainval, X_test, y_trainval, y_test, g_trainval, g_test = group_split(
-        X, y, groups, test_size=0.20, random_state=RANDOM_STATE,
+        X, y, groups, test_size=TEST_SIZE, random_state=RANDOM_STATE,
     )
     print(f"Trainval: {len(X_trainval)} ({g_trainval.nunique()} games) | "
           f"Test: {len(X_test)} ({g_test.nunique()} games)")

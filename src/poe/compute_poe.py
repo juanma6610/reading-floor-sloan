@@ -25,19 +25,19 @@ from sklearn.model_selection import GroupKFold
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from train_xgboost import load_data
+from train_xgboost import DATA_PATH, load_data
 
 RANDOM_STATE = 42
 N_FOLDS = 5
 MIN_SHOTS = 100  # reporting threshold; below this, POE is too noisy to interpret
 
 # Fixed tree count (no early stopping inside each fold — we don't waste a
-# val slice from each fold's training data; 600 was where the main model
-# plateaued in the held-out training run).
+# val slice from each fold's training data; ~1150 is where the main model
+# plateaued in the held-out training run, train_xgboost.py best_iteration 1163).
 XGB_PARAMS = dict(
     enable_categorical=True,
     tree_method='hist',
-    n_estimators=600,
+    n_estimators=1150,
     learning_rate=0.02,
     max_depth=5,
     min_child_weight=5,
@@ -107,7 +107,7 @@ def out_of_fold_predict(X, y, groups, n_folds=N_FOLDS):
 # 3. POE pipeline
 # ============================================================
 
-def compute_poe(csv_path='data/shot_features_valid2.csv',
+def compute_poe(csv_path=DATA_PATH,
                 n_folds=N_FOLDS,
                 min_shots=MIN_SHOTS,
                 out_dir='results'):

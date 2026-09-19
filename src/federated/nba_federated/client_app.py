@@ -10,15 +10,11 @@ Each client represents one NBA team. On every FL round:
 The client also evaluates the global model on its local test split so the
 server can track per-team performance without ever seeing raw team data.
 
-Hyperparameters mirror the federated config in pyproject.toml
-([tool.flwr.app.config]):
-  - NO `scale_pos_weight` (classes are ~balanced; calibration matters
-    downstream for POE/EPV).
-  - eta=0.01, max_depth=4, min_child_weight=10, reg_lambda=2.0,
-    subsample/colsample=0.8 (regularized harder than the centralized
-    baseline to flatten Non-IID drift).
-The server is responsible for sending these via `on_fit_config_fn`; the
-defaults below are a safety net in case the config is empty.
+Hyperparameters come from pyproject.toml ([tool.flwr.app.config]) via the
+server's `on_fit_config_fn`: max_depth=5, eta=0.05, min_child_weight=10,
+reg_lambda=2.0, subsample/colsample=0.8, NO `scale_pos_weight` (calibration
+matters downstream for POE/EPV). The defaults below mirror those values as a
+safety net in case the config is empty.
 """
 
 import gc
@@ -32,7 +28,8 @@ from flwr.common import (
 )
 from flwr.common.logger import log
 
-from nba_federated.task import load_partition
+from nba_federated.task import partition_frames
+from nba_federated import dp, hardening
 
 
 # ──────────────────────────────────────────────────────────────
@@ -72,8 +69,8 @@ def _build_xgb_params(config: dict) -> dict:
         "objective":        config.get("params.objective",        "binary:logistic"),
         "eval_metric":      config.get("params.eval_metric",      "logloss"),
         "tree_method":      config.get("params.tree_method",      "hist"),
-        "max_depth":        int(config.get("params.max_depth",     4)),
-        "eta":              float(config.get("params.eta",         0.01)),
+        "max_depth":        int(config.get("params.max_depth",     5)),
+        "eta":              float(config.get("params.eta",         0.05)),
         "subsample":        float(config.get("params.subsample",   0.8)),
         "colsample_bytree": float(config.get("params.colsample_bytree", 0.8)),
         "min_child_weight": int(config.get("params.min_child_weight", 10)),
@@ -108,16 +105,33 @@ def client_fn(context: Context):
 
     log(INFO, f"[Client {partition_id}] Loading partition (strategy={strategy}, seed={seed})")
 
-    train_dmatrix, test_dmatrix, num_train, num_test = load_partition(
+    X_train, X_test, y_train, y_test = partition_frames(
         partition_id=partition_id,
         num_partitions=num_partitions,
         strategy=strategy,
         data_path=data_path,
         random_state=seed,
     )
+    num_train, num_test = len(X_train), len(X_test)
+
+    # Layer-1 hardening (nba_federated/hardening.py). public-bins: train on
+    # features rounded to a public grid, then snap thresholds to it, so no split
+    # value comes from this team's data. harden-strip: zero the per-node stats
+    # (sum_hessian, loss_changes, internal weights) before sending.
+    public_bins  = bool(context.run_config.get("public-bins", False))
+    harden_strip = bool(context.run_config.get("harden-strip", False))
+    edges = hardening.public_edges(list(X_train.columns)) if public_bins else None
+    X_fit = hardening.bin_to_public_edges(X_train, edges) if public_bins else X_train
+
+    train_dmatrix = xgb.DMatrix(X_fit, label=y_train)
+    test_dmatrix  = xgb.DMatrix(X_test, label=y_test)    # raw: snapped trees predict identically
 
     log(INFO, f"[Client {partition_id}] "
               f"Train={num_train} shots | Test={num_test} shots")
+
+    # Per-client RNG for the (optional) differential-privacy leaf noise.
+    # Seeded per partition so runs are reproducible; distinct across clients.
+    dp_rng = np.random.default_rng(1000 + partition_id)
 
     class XGBClient(Client):
 
@@ -175,6 +189,17 @@ def client_fn(context: Context):
                     n_new = local_model.num_boosted_rounds()
                     return_bst = local_model[n_old:n_new]
 
+            if public_bins:
+                return_bst = hardening.snap_thresholds(return_bst, edges)
+
+            # Optional local differential privacy: clip + noise the leaves of
+            # the tree(s) we are about to transmit. No-op if dp-epsilon <= 0
+            # (default), so the baseline protocol is unchanged.
+            return_bst = dp.maybe_dp(return_bst, num_local_round, ins.config, dp_rng)
+
+            if harden_strip:
+                return_bst = hardening.strip_bookkeeping(return_bst)
+
             serialised_model = _model_to_params(return_bst)
             del local_model, return_bst
             gc.collect()
@@ -218,5 +243,15 @@ def client_fn(context: Context):
     return XGBClient()
 
 
-# Flower ClientApp entry point
-app = ClientApp(client_fn=client_fn)
+def dispatch_client_fn(context: Context):
+    if str(context.run_config.get("protocol", "bagging")) == "histogram":
+        from nba_federated.hist_client import HistClient
+        return HistClient(context)
+    return client_fn(context)
+
+
+# Flower ClientApp entry point. The optional SecAgg+ mod is a pass-through unless the
+# server runs the SecAgg+ workflow (histogram protocol with hist-secagg = true).
+from nba_federated.hist_client import optional_secaggplus_mod  # noqa: E402
+
+app = ClientApp(client_fn=dispatch_client_fn, mods=[optional_secaggplus_mod])

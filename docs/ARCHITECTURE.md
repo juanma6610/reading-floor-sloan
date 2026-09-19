@@ -69,13 +69,13 @@ Standalone R project (`renv` lockfile included) that produces the soft archetype
 | `spatial.py` | Team convex-hull spacing, Voronoi space control, delta-distance/delta-time control maps. |
 | `shot_features.py` | Core extractor. For each PBP shot event: recovers the release frame (ball-z apex ≥ 9 ft, walk-back to z ≤ 10 ft & ball–shooter dist ≤ 2.5 ft), then computes ~37 model features: geometry (dist, x, y, angle), defender pressure (closest/second defender distance-angle-time, tight-contest counts), kinematic decomposition (parallel/perpendicular velocity & acceleration for shooter and defender), release mechanics (height, speed, angle, x, y), tempo (shot clock, touch time, catch-and-shoot), spacing (hull ratio), and the 8 GMM archetype probabilities. Dunks/tips flagged via PBP regex. |
 | `process_batch.py` | Multiprocessing batch driver over `allgames.txt` → `data/shot_features_full.csv` (rename/copy to `_valid2` after archetype columns are applied). |
-| `train_xgboost.py` | Centralized baseline. Game-disjoint 65/15/20 split (`GroupShuffleSplit` on `game_id`), early stopping on validation log-loss, evaluation focused on calibration (Brier, log loss, reliability diagram). |
-| `tune_xgboost.py` | Random search (30 candidates × GroupKFold(5)) scored by CV log-loss; refits best config → `data/xgb_shot_model_tuned.json`, `results/best_params.json`. |
-| `compute_poe.py` | Out-of-fold (GroupKFold over games) P(make) for every shot → per-shot POE (`shot_value × (made − xMake)`, shot value from PBP "3PT" regex) → player leaderboard (≥100 shots). |
+| `train_xgboost.py` | Canonical centralized model on `data/shot_features_valid2_type.csv` → `data/xgb_shot_model.json`. Defines `DATA_PATH` and `METADATA_COLS` (same features as the federated model). Held-out test = the federated global test games (`GroupShuffleSplit` on `game_id`, 15%, seed 42); 15% of the remaining games for early stopping on log-loss; evaluation focused on calibration. |
+| `tune_xgboost.py` | Random search (30 candidates × GroupKFold(5)) scored by CV log-loss on the same train/test games as `train_xgboost.py`; refits best config → `data/xgb_shot_model_tuned.json`, `results/best_params.json`. |
+| `compute_poe.py` | Out-of-fold (GroupKFold over games, 1150 trees ≈ the canonical model's early-stopping point) P(make) for every shot → per-shot POE (`shot_value × (made − xMake)`, shot value from PBP "3PT" regex) → player leaderboard (≥100 shots). |
 | `compute_def_poe.py` | Defender POE (points suppressed below expectation for the closest defender) + offensive-vs-defensive archetype matchup heatmap. |
-| `correlate_poe.py` | Correlates POE with Basketball-Reference advanced metrics (TS%, PER, OBPM, …) incl. partial correlations controlling for USG%. Reads `results/poe_leaderboard.csv`; writes correlation tables to `results/`. |
-| `thesis_results.py` | One-shot generator of Results-chapter tables and figures (headline metrics vs baselines, per-zone metrics, calibration, feature importance, POE leaderboard, case-study shot charts). Reads `data/shot_features_valid2.csv`. |
-| `plot_per_zone_poe.py` | Per-zone POE decomposition figure (Results section). |
+| `correlate_poe.py` | Correlates POE with Basketball-Reference advanced metrics (TS%, PER, OBPM, …) incl. partial correlations controlling for USG%. Reads `results/poe_leaderboard.csv` and `clusters/data/{ad,pos}.csv`; writes correlation tables to `results/`. |
+| `thesis_results.py` | One-shot generator of Results-chapter tables and figures (headline metrics vs baselines, per-zone metrics, calibration, feature importance, POE leaderboard, case-study shot charts). Reads the canonical dataset (`train_xgboost.DATA_PATH`). |
+| `plot_per_zone_poe.py` | Per-zone POE decomposition figure (Results section). Reads `results/poe_per_shot.csv`. |
 | `visualization.py` | Court drawing, frame rendering, game animation utilities (used for Figure 3.1-style renders). |
 | `spa.ipynb` | Spacing analysis notebook; also builds the lineup POE tables (`data/lineup_poe*.csv`). |
 
@@ -83,30 +83,38 @@ Standalone R project (`renv` lockfile included) that produces the soft archetype
 
 | File | Purpose |
 |---|---|
-| `nba_federated/task.py` | Data loading/partitioning from `data/shot_features_valid2.csv`. Single cached game-disjoint global 85/15 train/test split (seed 42, shared by all clients & server); partitions: `team` (30 non-IID clients = franchises) or `iid` (stratified control). |
+| `nba_federated/task.py` | Data loading/partitioning from `data/shot_features_valid2_type.csv`. Single cached game-disjoint global 85/15 train/test split (seed 42, shared by all clients & server, identical to `train_xgboost.py`); partitions: `team` (30 non-IID clients = franchises) or `iid` (random control); each client holds out 20% of its games for local validation. |
 | `nba_federated/client_app.py` | Flower client: trains 1 tree/round on local data from the global booster. |
-| `nba_federated/server_app.py` | Flower server: `FedXgbBagging` (primary) or `FedXgbCyclic` (ablation, with a custom central-eval adapter); per-round central evaluation, best-AUC checkpointing → `results/federated/`. |
-| `pyproject.toml` | Flower app config + XGBoost hyperparameters (depth 4, eta 0.01, min_child_weight 10, λ 2.0). |
+| `nba_federated/server_app.py` | Flower server: `FedXgbBagging` (primary) or `FedXgbCyclic` (ablation; deterministic round-robin + central-eval adapter). Logs per-round test metrics for curves only and saves the final booster → `results/federated/`. No checkpoint is chosen on test data. |
+| `nba_federated/hardening.py` | Layer-1 defences, off by default (`harden-strip`, `public-bins` in `pyproject.toml`): zero the per-node stats prediction never reads (`sum_hessian`, `loss_changes`, internal weights), and train on a fixed public bin grid (ranges from physical limits) with thresholds snapped to it. Predictions on raw features are unchanged; public bins cost no measurable accuracy. |
+| `leakage_attack.py` | Reconstruction attack on round-1 trees: an honest-but-curious server recovers each team's exact shot and make counts per tree region (also through the leaf-only DP prototype), and — after layer-1 hardening — still each region's make rate from leaf values alone. → `leakage_attack_summary.csv`, `leakage_attack_leaves.csv`. |
+| `nba_federated/hist_gbdt.py` | **Histogram protocol** engine: all teams grow one shared tree per round from summed per-bin gradient/hessian histograms on the public grid (exactly centralized XGBoost `hist` without DP, verified to 1e-7), optional distributed Gaussian DP on the histograms (`split_mode` `hist` or data-independent `random` structure), export to a standard XGBoost booster. |
+| `nba_federated/hist_client.py`, `hist_server.py` | Flower ClientApp / ServerApp for the histogram protocol: one round per tree level, federated validation after each tree, optional SecAgg+ (`hist-secagg`) so the server only sees the sum over teams. |
+| `sim_histogram.py` | In-process runs of the histogram protocol on the 30 team silos: `--utility` (no DP) and `--dp-sweep` (privacy/utility frontier; parts merged with `--merge`) → `hist_utility.csv`, `hist_dp_frontier.csv`. |
+| `nba_federated/dp.py` | RDP accountant for the Gaussian mechanism (used by `hist_gbdt.py`), plus the superseded leaf-perturbation prototype for the bagging protocol, which is NOT a valid guarantee (tree structure and node statistics are sent in the clear; see `leakage_attack.py`). |
+| `pyproject.toml` | Flower app config + XGBoost hyperparameters (depth 5, eta 0.05, subsample/colsample 0.8, min_child_weight 10, λ 2.0), shared with the matched centralized baseline. |
 | `run_seeds.py` | Runs the 4 configs (bagging/cyclic × iid/team) × 5 seeds {42, 7, 123, 2024, 99}, renaming outputs per run. |
-| `aggregate_seeds.py` | Reduces per-seed metrics to the mean±std table (thesis Table 4.3). |
-| `paired_bootstrap_ci.py` | Paired bootstrap CIs (1000 resamples) for the federated-vs-centralized gap → `paired_bootstrap_ci_*.csv/.tex`. |
-| `implementation_plan_federated.md`, `federated_learning_discussion.md` | Design notes. |
+| `evaluate_federated.py` | Produces every federated number: selects each run's round on federated validation log-loss, trains the matched centralized baseline (same params, union of client train splits) and the local-only baselines, game-level cluster bootstrap CIs → `eval_summary.csv/.tex`, `eval_per_run.csv`, `eval_curves.csv`, `federated_convergence.png`, `*_model_selected.json`. |
+| `sim_bagging.py` | Fast Flower-free simulator of bagging for config sweeps (research proxy). |
+| `dp_validation.py` | Privacy/utility sweep for the DP prototype (reads the federation cost from `eval_summary.csv`). |
 
 ### `data/` — datasets and models
 
 | File | Purpose |
 |---|---|
 | `tracking/` | Three sample raw SportVU game JSONs. |
-| `shot_features_valid2.csv` | **Canonical training file** — 95,219 shots × 48 cols, archetypes as the named 4+4 GMM soft labels. Used by `train_xgboost.py`, `tune_xgboost.py`, `compute_poe.py`, and the federated pipeline. |
+| `shot_features_valid2_type.csv` | **Canonical training file** — 97,997 shots / 631 games × 65 cols: `valid2` plus 18 PBP shot-type flags (`stype_*`, replacing `is_dunk_or_tip`). Built by `src/experiments/add_shot_type.py`. Used by every model: `train_xgboost.py`, `tune_xgboost.py`, `compute_poe.py`, the federated pipeline. |
+| `shot_features_valid2.csv` | Base feature file (97,997 shots × 48 cols, named 4+4 GMM archetype soft labels); input to the `src/experiments/add_*.py` variant builders. |
 | `shot_features_valid.csv` | Earlier extraction pass: 97,826 shots / 630 games (the counts quoted in the thesis data section). |
-| `xgb_shot_model_tuned.json` | Saved tuned centralized booster. |
+| `xgb_shot_model.json` | Canonical centralized booster (`train_xgboost.py`). |
+| `xgb_shot_model_tuned.json` | Tuned centralized booster (`tune_xgboost.py`). |
 | `lineup_poe.csv`, `lineup_poe_offense.csv`, `lineup_poe_defense.csv` | 5-man lineup POE tables (built in `spa.ipynb`). |
 | `players.csv`, `pbp/` | Support lookups / sample PBP + `EVENTMSGTYPE` code reference (`pbpevents.txt`). |
-| `legacy/` | Superseded artifacts kept for reference: `shot_features.csv`, `shot_features_before_dunks.csv`, untuned `xgb_shot_model.json`, and the older `poe_*` copies. Git-ignored. |
+| `legacy/` | Superseded artifacts kept for reference: `shot_features.csv`, `shot_features_before_dunks.csv`, the pre-shot-type models (`xgb_shot_model*_valid2_pre20260919.json`), and the older `poe_*` copies. Git-ignored. |
 
 ### `results/` — experiment outputs
 
-Canonical POE outputs (`poe_per_shot.csv`, `poe_leaderboard.csv`), headline/per-zone metric tables, tuning history + best params, correlations with advanced metrics, and `federated/` with per-seed metrics CSVs, per-seed best boosters, aggregated summary, and paired-bootstrap CI tables (CSV + LaTeX).
+Canonical POE outputs (`poe_per_shot.csv`, `poe_leaderboard.csv`), headline/per-zone metric tables, tuning history + best params, correlations with advanced metrics, and `federated/` with per-run test curves, final and validation-selected boosters, and the `eval_*` tables from `evaluate_federated.py`. Pre-2026-09-19 outputs (test-selected checkpoints) are archived in `federated_archive_pre_20260919/` and `legacy_valid2_pre20260919/`.
 
 ### `figures/` and `figures_thesis/`
 
@@ -127,35 +135,47 @@ python src/train_xgboost.py
 python src/tune_xgboost.py --n-iter 30
 
 # 4. POE applications (write to results/)
-python src/compute_poe.py
-python src/compute_def_poe.py
-python src/correlate_poe.py
+PYTHONPATH=src python src/poe/compute_poe.py
+PYTHONPATH=src python src/poe/compute_def_poe.py
+PYTHONPATH=src python src/poe/plot_per_zone_poe.py
+PYTHONPATH=src python src/poe/correlate_poe.py
 
 # 5. Federated experiments (needs flwr; ~hours)
 cd src/federated
 pip install -e .
-python run_seeds.py                 # all 4 configs × 5 seeds
-python aggregate_seeds.py
-python paired_bootstrap_ci.py       # from project root: python src/federated/paired_bootstrap_ci.py
+python run_seeds.py                 # bagging/cyclic: 4 configs × 5 seeds
+flwr run . --run-config "protocol='histogram'"                      # histogram protocol in Flower
+flwr run . --run-config "protocol='histogram' hist-secagg=true"     # … with SecAgg+
+cd ../..
+python src/federated/sim_histogram.py --utility --seeds 42 7 123 2024 99   # histogram protocol, 5 seeds
+python src/federated/sim_histogram.py --dp-sweep --tag all                 # DP frontier (hours; see --help)
+python src/federated/sim_histogram.py --merge
+python src/federated/evaluate_federated.py   # every federated number, table and figure
+python src/federated/leakage_attack.py       # reconstruction attack on bagging trees
 
-# 6. Thesis tables/figures
-python src/thesis_results.py
+# 6. Thesis tables/figures (retrains the canonical model + POE)
+PYTHONPATH=src python src/thesis_results.py
 ```
 
 ## Headline results (2015–16, game-disjoint test set)
 
 | Model | Brier | Log loss | ROC-AUC |
 |---|---|---|---|
-| Constant (base rate) | 0.2475 | 0.6881 | 0.500 |
-| Distance-only logistic | 0.2400 | 0.6728 | 0.603 |
-| XGBoost (full features) | ~0.220 | ~0.628 | ~0.671 |
-| Federated (4 configs, 5 seeds) | 0.2274–0.2279 | ~0.646 | 0.6446–0.6468 |
+| Constant (base rate) | 0.2472 | 0.6875 | 0.500 |
+| Distance-only logistic | 0.2411 | 0.6753 | 0.595 |
+| XGBoost (full features, canonical) | 0.2042 | 0.5914 | 0.732 |
+| Matched centralized (federated params, union of client train splits) | 0.2050 | 0.5932 | 0.729 |
+| Federated — histogram protocol, team silos (5 seeds) | 0.2046 | — | 0.731 |
+| Federated — tree bagging / cyclic, 4 configs (5 seeds) | 0.2181–0.2206 | 0.624–0.631 | 0.674–0.685 |
+| Histogram protocol + distributed DP, ε = 1 / 4 (δ = 1e-5) | 0.2167 / 0.2125 | — | 0.693 / 0.707 |
+| One team alone (mean of 30) | 0.2249 | 0.6403 | 0.659 |
 
-Federation costs ≈ +2.6% relative Brier vs the centralized baseline; team-level non-IID partitioning is not measurably worse than the IID control.
+The histogram protocol matches centralized training (relative Brier −0.2%, 95% game-level bootstrap CI [−0.5%, 0.0%]); tree bagging costs +6.4% [+5.7%, +7.0%] (team silos) to +7.7% (cyclic, IID). Team silos are not measurably worse than the IID control. Sources: `results/federated/eval_summary.csv`, `hist_dp_frontier.csv`.
 
 ## Known issues / caveats
 
 - **Legacy spacing feature.** `spatial.get_spacing_area` now returns true hull areas (`ConvexHull.volume`), but the shipped `shot_features_valid2.csv` was extracted with the old perimeter-based version (2-D `ConvexHull.area`), so its `ratio_off_def_hull` column is a perimeter ratio. Re-extract if the area semantics matter; the trained models are consistent with the shipped CSV.
-- **Dataset-count mismatch with the thesis text.** The thesis data section quotes 630 games / 97,826 shots (from `shot_features_valid.csv`); the trained models actually use 613 games / 95,219 shots (`shot_features_valid2.csv`).
-- **Stale result CSVs.** `results/headline_metrics.csv` and `results/per_zone_metrics.csv` come from a different run than the thesis Tables 4.1/4.2 (differences in the 3rd decimal). Re-run `thesis_results.py` to regenerate.
+- **Dataset-count mismatch with the thesis text.** The thesis data section quotes 630 games / 97,826 shots (from `shot_features_valid.csv`); the trained models use 631 games / 97,997 shots (`shot_features_valid2_type.csv`).
+- **Shot type is not tracking-derived.** The `stype_*` flags come from the PBP scorer's description (type tokens only, never the outcome tokens). They add +0.06 AUC but reintroduce an NBA-PBP dependency; a tracking-based shot-type classifier would restore portability.
+- **Figures without a generator in this repo.** `assets/shap_beeswarm.png`, `assets/lineup_poe_leaderboard.png` and `assets/shot_heatmap_curry_lbj.png` predate the shot-type model and were not regenerated.
 - **`compute_poe.py` must run before `compute_def_poe.py`/`correlate_poe.py`** — the latter two read `results/poe_per_shot.csv` / `results/poe_leaderboard.csv`.

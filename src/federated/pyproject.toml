@@ -22,14 +22,23 @@ serverapp = "nba_federated.server_app:app"
 clientapp = "nba_federated.client_app:app"
 
 [tool.flwr.app.config]
+# ─── Protocol ──────────────────────────────────────────────────
+# "bagging":   each team grows its own trees, the server concatenates them
+#              (FedXgbBagging / FedXgbCyclic, see `aggregation`).
+# "histogram": all teams grow one shared tree from summed gradient histograms on
+#              a public bin grid (nba_federated/hist_*.py). Same trees as
+#              centralized XGBoost without DP; supports SecAgg+ and distributed DP.
+protocol = "bagging"
+
 # ─── Federation setup ──────────────────────────────────────────
 num-server-rounds = 50
 num-clients = 30
-strategy = "iid"            # data partitioning: "team" (Non-IID, primary) or "iid" (control)
+strategy = "team"           # data partitioning: "team" (Non-IID, primary) or "iid" (control)
 local-epochs = 1             # trees added per client per round
 aggregation = "bagging"      # server-side aggregation: "bagging" or "cyclic"
                              # For the cyclic ablation, set this to "cyclic" and
-                             # raise num-server-rounds to ~300 (1 tree per round).
+                             # raise num-server-rounds to 1500 (1 tree per round,
+                             # 50 visits per team) — as run_seeds.py does.
 seed = 42                    # master training seed. Controls IID partitioning,
                              # local train/eval split, and XGBoost subsample RNG.
                              # The global test holdout is NOT controlled by this —
@@ -40,14 +49,44 @@ seed = 42                    # master training seed. Controls IID partitioning,
 # Propagated to every client by server_app.make_on_fit_config_fn.
 # NOTE: NO scale_pos_weight — the centralized baseline omits it on purpose
 # so the model produces calibrated probabilities for the POE/EPV pipeline.
-# Defaults are tuned for the bagging+non-IID regime: small eta + strong
-# regularization keep the post-peak drift gentle.
+# The centralized baseline in evaluate_federated.py uses these SAME params, so
+# the federated-vs-centralized gap isolates the protocol, not tuning.
 "params.objective"        = "binary:logistic"
 "params.eval_metric"      = "logloss"
 "params.tree_method"      = "hist"
-"params.max_depth"        = 4    # was 5 — simpler trees flatten Non-IID drift
-"params.eta"              = 0.01 # was 0.02 — slower learning per tree
+"params.max_depth"        = 5
+"params.eta"              = 0.05
 "params.subsample"        = 0.8
 "params.colsample_bytree" = 0.8
-"params.min_child_weight" = 10   # was 5 — fewer tiny-leaf overfits
+"params.min_child_weight" = 10
 "params.reg_lambda"       = 2.0  # L2 regularization on leaf values
+
+# ─── Layer-1 hardening (nba_federated/hardening.py; OFF by default) ─────
+# harden-strip: zero sum_hessian / loss_changes / internal weights before sending
+#               (they give the server exact per-region shot and make counts; see
+#               leakage_attack.py). Predictions are unchanged.
+# public-bins:  split thresholds from a fixed public grid, not local quantiles.
+#               Changes the model slightly (coarser candidate splits).
+"harden-strip"            = false
+"public-bins"             = false
+
+# ─── Histogram protocol (protocol = "histogram") ───────────────
+"hist-trees"              = 3000     # upper bound; stops after hist-patience trees without val improvement
+"hist-patience"           = 200
+"hist-split-mode"         = "hist"   # "hist" (best split from histograms) or "random" (public random
+                                     # structure, only leaf sums released: far better under DP)
+"hist-bin-stride"         = 1        # keep every k-th public bin edge (coarser grid → less DP noise)
+"hist-leaf-clip"          = 1.0      # |leaf weight| cap before eta, DP only
+"hist-secagg"             = false    # Flower SecAgg+: the server only sees the sum over teams
+"hist-tag"                = ""       # output name suffix; "" → <strategy>_seed<seed>[_eps<ε>][_secagg]
+
+# ─── Differential privacy (optional; OFF by default) ───────────
+# dp-epsilon <= 0 disables DP entirely.
+# protocol = "histogram": total (dp-epsilon, dp-delta) over the whole run, Gaussian
+#   noise on the histograms split across teams (nba_federated/hist_gbdt.py). Valid.
+# protocol = "bagging": superseded leaf-noise prototype (dp-clip, dp-mechanism;
+#   nba_federated/dp.py) — NOT a valid guarantee, see leakage_attack.py.
+"dp-epsilon"              = 0.0
+"dp-clip"                 = 0.3
+"dp-mechanism"           = "gaussian"  # "gaussian" (Renyi-DP accountant) or "laplace" (basic comp)
+"dp-delta"               = 1e-5        # (eps, delta)-DP target for the gaussian mechanism

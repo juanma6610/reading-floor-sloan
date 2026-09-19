@@ -7,10 +7,12 @@ renamed to include both the partition strategy and the seed, so the
 matrix of runs doesn't clobber itself.
 
 Output layout (in <project>/results/federated/):
-  federated_<agg>_<partition>_seed<S>_metrics.csv
-  xgb_federated_<agg>_<partition>_seed<S>_model.json        (latest round)
-  xgb_federated_<agg>_<partition>_seed<S>_model_best.json   (peak-AUC round)
-  run_<agg>_<partition>_seed<S>.log                         (flwr stdout/stderr)
+  federated_<agg>_<partition>_seed<S>_metrics.csv   (per-round global-test curve)
+  xgb_federated_<agg>_<partition>_seed<S>_model.json  (final round)
+  run_<agg>_<partition>_seed<S>.log                   (flwr stdout/stderr)
+
+Then run evaluate_federated.py to select each run's round on federated
+validation loss and produce every reported number.
 
 NOTE: the global test holdout in task.py is intentionally NOT seeded by
 this — it always uses RANDOM_STATE = 42 from the module constant. That
@@ -69,9 +71,8 @@ def _run_config_string(num_rounds: int, partition: str, aggregation: str, seed: 
 def _server_outputs(aggregation: str) -> dict[str, str]:
     """Server-written files (keyed only on aggregation), mapped to per-run names."""
     return {
-        f"federated_{aggregation}_metrics.csv":         "federated_{label}_seed{seed}_metrics.csv",
-        f"xgb_federated_{aggregation}_model.json":      "xgb_federated_{label}_seed{seed}_model.json",
-        f"xgb_federated_{aggregation}_model_best.json": "xgb_federated_{label}_seed{seed}_model_best.json",
+        f"federated_{aggregation}_metrics.csv":    "federated_{label}_seed{seed}_metrics.csv",
+        f"xgb_federated_{aggregation}_model.json": "xgb_federated_{label}_seed{seed}_model.json",
     }
 
 
@@ -105,8 +106,7 @@ def _wait_for_run_to_finish(
 
     A run is considered finished when ALL of the following hold:
       (i)   the metrics CSV exists and has >= num_rounds data rows;
-      (ii)  the booster JSONs (_model.json and _model_best.json) exist
-            and are non-empty;
+      (ii)  the final booster JSON exists and is non-empty;
       (iii) none of those three files has changed size for `stability_s`
             consecutive seconds (i.e. the server has stopped writing).
 
@@ -116,8 +116,7 @@ def _wait_for_run_to_finish(
 
     metrics_csv = OUTPUT_DIR / f"federated_{aggregation}_metrics.csv"
     model_json  = OUTPUT_DIR / f"xgb_federated_{aggregation}_model.json"
-    best_json   = OUTPUT_DIR / f"xgb_federated_{aggregation}_model_best.json"
-    watched = [metrics_csv, model_json, best_json]
+    watched = [metrics_csv, model_json]
 
     print(f"  waiting for outputs to finish writing "
           f"(>= {num_rounds} rounds, stable for {stability_s:.0f}s, "
@@ -142,14 +141,14 @@ def _wait_for_run_to_finish(
 
         # (ii) booster JSONs present and non-empty
         sizes = {p: (p.stat().st_size if p.exists() else 0) for p in watched}
-        nonempty_jsons = sizes[model_json] > 200 and sizes[best_json] > 200
+        nonempty_jsons = sizes[model_json] > 200
 
         # Heartbeat
         now = time.time()
         if now - last_progress_print > 30:
             print(f"    [waiting] rounds in CSV = {n_rows}/{num_rounds},  "
-                  f"sizes(metrics, model, best) = "
-                  f"({sizes[metrics_csv]}, {sizes[model_json]}, {sizes[best_json]}) B")
+                  f"sizes(metrics, model) = "
+                  f"({sizes[metrics_csv]}, {sizes[model_json]}) B")
             last_progress_print = now
 
         # (iii) stability

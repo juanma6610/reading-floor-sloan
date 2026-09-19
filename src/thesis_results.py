@@ -34,7 +34,7 @@ from sklearn.metrics import (
 )
 from sklearn.calibration import calibration_curve
 
-from train_xgboost import load_data, train_xgboost
+from train_xgboost import DATA_PATH, load_data, train_xgboost
 from poe.compute_poe import compute_poe, infer_shot_value
 
 # ------------------------------------------------------------
@@ -60,10 +60,7 @@ RES_DIR = Path('results')
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 RES_DIR.mkdir(parents=True, exist_ok=True)
 
-# valid2 is the canonical training file (named GMM archetype columns);
-# _full.csv carries the legacy Prob_Cluster_* columns and would not
-# reproduce the thesis feature-importance figure.
-CSV_PATH = 'data/shot_features_valid2.csv'
+CSV_PATH = DATA_PATH   # canonical dataset (valid2 + PBP shot type), see train_xgboost.py
 CASE_STUDY_PLAYERS = ['Stephen Curry', 'Russell Westbrook']
 
 
@@ -205,6 +202,8 @@ def plot_feature_importance_top20(model, feature_cols, out_path):
             return 'Defender archetype'
         if 'vel' in n or 'acc' in n or n in ('touch_time',):
             return 'Shooter kinematics'
+        if n.startswith('stype_'):
+            return 'Shot type (PBP)'
         if n in ('dist', 'x', 'y', 'is_3_pointer', 'shot_clock'):
             return 'Shot context'
         return 'Other'
@@ -216,6 +215,7 @@ def plot_feature_importance_top20(model, feature_cols, out_path):
         'Release mechanics':  '#8064a2',
         'Shooter archetype':   '#f79646',
         "Defender archetype": '#4bacc6',
+        'Shot type (PBP)':    '#d4a017',
         'Other':              '#7f7f7f',
     }
     cats = [category(name) for name in top.index]

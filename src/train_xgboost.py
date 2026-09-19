@@ -32,23 +32,31 @@ import matplotlib.pyplot as plt
 
 RANDOM_STATE = 42
 
+# Canonical dataset: valid2 + PBP shot-type flags (stype_*). Every model in the
+# paper — centralized, federated, POE — trains on this file.
+DATA_PATH = 'data/shot_features_valid2_type.csv'
+
+# Never model inputs. Must match METADATA_COLS in federated/nba_federated/task.py
+# so the centralized and federated models see the same features.
+METADATA_COLS = ['player_name', 'game_time', 'quarter', 'score_margin',
+                 'team_id', 'game_id', 'description', 'closest_def_name']
+
+# Held-out test games. Same GroupShuffleSplit (15% of games, seed 42) as the
+# federated global test set, so every reported number is on the same games.
+TEST_SIZE = 0.15
+VAL_SIZE = 0.15   # fraction of the training games used for early stopping
+
 # ============================================================
 # 1. Data Loading & Preparation
 # ============================================================
 
-def load_data(csv_path='data/shot_features_valid2.csv'):
+def load_data(csv_path=DATA_PATH):
     print("Loading dataset...")
     df = pd.read_csv(csv_path)
 
-    #df=df[df["is_dunk_or_tip"]==False]
-
-    metadata_cols = [
-        'player_name', 'game_time', 'quarter', 'score_margin',
-        'description', 'team_id', 'game_id', "is_dunk_or_tip", "is_3_pointer","closest_def_name"
-    ]
     target_col = 'made_shot'
 
-    feature_cols = [c for c in df.columns if c not in metadata_cols + [target_col]]
+    feature_cols = [c for c in df.columns if c not in METADATA_COLS + [target_col]]
 
     X = df[feature_cols]
     y = df[target_col]
@@ -81,14 +89,13 @@ def group_split(X, y, groups, test_size, random_state):
 # ============================================================
 
 def train_xgboost(X, y, groups):
-    # 1) Hold out the test set by game (20%).
+    # 1) Hold out the test set by game (15%, identical to the federated test set).
     X_trainval, X_test, y_trainval, y_test, g_trainval, g_test = group_split(
-        X, y, groups, test_size=0.20, random_state=RANDOM_STATE
+        X, y, groups, test_size=TEST_SIZE, random_state=RANDOM_STATE
     )
     # 2) Carve a validation set out of training (also by game) for early stopping.
-    #    0.1875 of the 80% trainval ≈ 15% of the original → 65/15/20 split.
     X_train, X_val, y_train, y_val, _, _ = group_split(
-        X_trainval, y_trainval, g_trainval, test_size=0.1875, random_state=RANDOM_STATE
+        X_trainval, y_trainval, g_trainval, test_size=VAL_SIZE, random_state=RANDOM_STATE
     )
 
     # Sanity check: no game appears in more than one split.
@@ -205,7 +212,7 @@ def evaluate_model(model, X_test, y_test, feature_cols, out_dir='.'):
 
 
 if __name__ == '__main__':
-    X, y, groups, feature_cols = load_data('data/shot_features_valid2.csv')
+    X, y, groups, feature_cols = load_data()
     model, X_val, y_val, X_test, y_test = train_xgboost(X, y, groups)
     metrics = evaluate_model(model, X_test, y_test, feature_cols)
 

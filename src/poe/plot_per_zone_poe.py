@@ -42,7 +42,7 @@ plt.rcParams.update({
     'axes.spines.right': False,
 })
 
-POE_PATH       = Path('data/legacy/poe_per_shot.csv')
+POE_PATH       = Path('results/poe_per_shot.csv')
 FIG_OUT        = Path('figures/per_zone_poe.png')
 TABLE_OUT      = Path('results/per_zone_poe.csv')
 MIN_SHOTS      = 150     # tighter than the overall 100 because we're slicing 4 ways

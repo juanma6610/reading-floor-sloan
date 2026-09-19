@@ -27,7 +27,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 POE_PER_SHOT  = 'results/poe_per_shot.csv'
-RAW_CSV       = 'data/shot_features_valid2.csv'
+RAW_CSV       = 'data/shot_features_valid2_type.csv'
 MIN_DEF_SHOTS = 100
 
 N_OFF_CLUSTERS = 4
@@ -48,7 +48,7 @@ def load_per_shot_with_extras(poe_path=POE_PER_SHOT, raw_path=RAW_CSV):
     if len(poe) != len(raw):
         raise ValueError(
             f"Row count mismatch: poe_per_shot has {len(poe)}, raw CSV has {len(raw)}. "
-            "Re-run compute_poe.py against the current shot_features_valid2.csv."
+            "Re-run compute_poe.py against the current shot_features_valid2_type.csv."
         )
 
     if 'closest_def_name' in raw.columns:

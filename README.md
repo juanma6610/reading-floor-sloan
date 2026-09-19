@@ -19,16 +19,16 @@
 
 ## Summary
 
-Converted raw optical tracking and Play by Play logs into a **calibrated model** that outputs the probability of converting the shot, using only information available *before the ball is released* and then showed that model can be **trained across all 30 teams without any team sharing its raw data** (federated learning), at a cost of just **~2.6%**.
+Converted raw optical tracking and Play by Play logs into a **calibrated model** that outputs the probability of converting the shot, using only information available *before the ball is released* and then showed that model can be **trained across all 30 teams without any team sharing its raw data** (federated learning) **at no measurable accuracy cost**, and with **formal differential privacy** at a small one.
 
 The calibrated probability powers a suite of analytics: a **Points Over Expectation (POE)** rating for shooters and defenders, per zone and archetype matchup breakdowns, and five man **lineup** evaluation.
 
 > Advanced MSc Artificial Intelligence thesis (Big Data Analytics), KU Leuven — *Juan Manuel Oliver*.
 
 **Highlights**
-- 🎯 **Well-calibrated** shot model: Brier **0.219**, log-loss **0.628**, ROC-AUC **0.670** on a *game-disjoint* test set, clearing the ~0.62 AUC ceiling of purely geometric models.
-- 🔒 **Federated across 30 teams** (Flower + `FedXgbBagging`/`FedXgbCyclic`), measured over 5 seeds and 4 configurations, with paired bootstrap confidence intervals.
-- 🧠 **Portable feature set** — release geometry, defender pressure, shooter/defender kinematics, spacing, tempo, and behavioural **archetypes** from a Gaussian Mixture Model, no dependency on NBA specific player IDs.
+- 🎯 **Well-calibrated** shot model: Brier **0.204**, log-loss **0.591**, ROC-AUC **0.732** on a *game-disjoint* test set (95 held-out games, 14,844 shots), far above the ~0.60 AUC of a distance-only model.
+- 🔒 **Federated across 30 teams** with Flower: a histogram protocol in which all teams grow shared trees from summed gradient histograms matches centralized training (Brier 0.2046 vs 0.2050), with optional **SecAgg+** and **distributed differential privacy** (ε = 1: AUC 0.693). Compared against tree bagging (+6.4% Brier), 5 seeds, game-level bootstrap CIs.
+- 🧠 **Mostly portable feature set** — release geometry, defender pressure, shooter/defender kinematics, spacing, tempo, and behavioural **archetypes** from a Gaussian Mixture Model, no dependency on NBA specific player IDs; plus **shot-type descriptors** (layup, dunk, floater, pull-up, …) parsed from the play-by-play text — the one non-tracking input, worth +0.06 AUC.
 - 📊 **Applications**: POE leaderboards (shooters & defenders), per zone calibration, archetype matchup heatmaps, lineup POE, and spatial shot charts, ability to train model while keeping data private.
 - 🧪 End-to-end, reproducible pipeline from raw `.7z` tracking archives → features → model → federated experiments → thesis figures.
 
@@ -75,9 +75,9 @@ A gradient-boosted model trained with **game-disjoint** splits, no game ever spa
 
 | Model | Brier ↓ | Log-loss ↓ | ROC-AUC ↑ |
 |---|---|---|---|
-| Constant (base rate) | 0.2475 | 0.6881 | 0.500 |
-| Distance-only logistic | 0.2400 | 0.6728 | 0.603 |
-| **XGBoost (full features)** | **0.219** | **0.628** | **0.670** |
+| Constant (base rate) | 0.2472 | 0.6875 | 0.500 |
+| Distance-only logistic | 0.2411 | 0.6753 | 0.595 |
+| **XGBoost (full features)** | **0.2042** | **0.5914** | **0.732** |
 
 <table>
 <tr>
@@ -90,9 +90,20 @@ A gradient-boosted model trained with **game-disjoint** splits, no game ever spa
 </tr>
 </table>
 
-### Federated learning — the privacy cost is small
+### Federated learning — no accuracy cost, and real privacy on top
 
-Training across the 30 teams as natural silos (non-IID by construction), the federated model stays within **~2.6%** Brier of the centralized baseline — statistically homogeneous across aggregation strategies and partitions, with all 95% paired-bootstrap CIs inside **[+2.0%, +3.2%]**.
+The 30 teams are the silos: no raw shot ever leaves its team. How the teams are combined decides both accuracy and privacy.
+
+| Protocol (team silos, 5 seeds) | Brier ↓ | ROC-AUC ↑ | vs centralized (95% CI) |
+|---|---|---|---|
+| Centralized, same hyperparameters | 0.2050 | 0.729 | — |
+| **Histogram protocol** — shared trees from summed gradient histograms | **0.2046** | **0.731** | **−0.2% [−0.5, 0.0]** |
+| Tree bagging (`FedXgbBagging`) — each team grows its own trees | 0.2181 | 0.685 | +6.4% [+5.7, +7.0] |
+| One team alone | 0.2249 | 0.659 | — |
+
+- **Tree bagging leaks.** From a single round-1 tree, an honest-but-curious server recovers each team's *exact* shot and make counts in every region the tree carves out (591/591 regions across 30 teams), even through leaf-noise "DP" (`leakage_attack.py`).
+- **The histogram protocol** only releases per-bin sums on a public bin grid. Under **SecAgg+** the server sees only the total over all 30 teams; without noise the trees are identical to centralized XGBoost.
+- **Distributed differential privacy** (each team adds 1/√30 of the Gaussian noise; Rényi-DP accounting, δ = 10⁻⁵, one shot protected): at **ε = 1** the model still reaches AUC **0.693** / Brier 0.2167, better than tree bagging *without* any privacy; at ε = 4, AUC 0.707.
 
 <p align="center"><img src="assets/federated_convergence.png" width="80%" alt="Federated convergence vs centralized baseline"></p>
 
@@ -129,7 +140,7 @@ src/                 Feature extraction, model training/tuning, POE, visualizati
   shot_features.py     Release-frame recovery + 37-feature extraction per shot
   train_xgboost.py     Game-disjoint calibrated model + evaluation
   compute_poe.py       Out-of-fold Points Over Expectation
-  federated/           Flower app: bagging/cyclic × team/IID, multi-seed, bootstrap CIs
+  federated/           Flower app: histogram protocol (+SecAgg+, DP) and bagging/cyclic, leakage attack, evaluation
 clusters/            R project: GMM player-archetype clustering
 figures_thesis/      Scripts that regenerate every thesis figure
 docs/                Rerun runbook + dataset documentation

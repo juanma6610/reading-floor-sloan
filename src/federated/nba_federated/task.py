@@ -35,9 +35,13 @@ GLOBAL_TEST_SIZE = 0.15        # held-out for server-side evaluation
 RANDOM_STATE     = 42
 
 # Default data path (relative to the federated/ directory when running flwr)
-DEFAULT_DATA_PATH = Path(__file__).resolve().parents[3] / 'data' / 'shot_features_valid2.csv'
+DEFAULT_DATA_PATH = Path(__file__).resolve().parents[3] / 'data' / 'shot_features_valid2_type.csv'
 if not DEFAULT_DATA_PATH.parent.exists():
-    DEFAULT_DATA_PATH = Path('/mnt/c/Users/juanm/Documents/KUL_MAI/TFM/TFM-KUL-Juan/data/shot_features_valid2.csv')
+    DEFAULT_DATA_PATH = Path('/mnt/c/Users/juanm/Documents/KUL_MAI/reading-floor-sloan/data/shot_features_valid2_type.csv')
+
+# Where every federated run writes its outputs: <project>/results/federated. Derived
+# from the data path so it is right both in the repo and in Flower's bundled app copy.
+OUTPUT_DIR = DEFAULT_DATA_PATH.parents[1] / "results" / "federated"
 
 
 def _get_feature_cols(df: pd.DataFrame) -> list[str]:
@@ -115,7 +119,7 @@ def get_team_ids(data_path: str = None) -> list:
     return sorted(df.iloc[train_idx]['team_id'].unique().tolist())
 
 
-def load_partition(
+def partition_frames(
     partition_id: int,
     num_partitions: int = 30,
     strategy: str = "team",
@@ -124,13 +128,13 @@ def load_partition(
     random_state: int = 42,
 ) -> tuple:
     """
-    Load training and local-evaluation data for a single federated client.
+    A single federated client's local train / local-eval split as DataFrames.
 
     Important: the client's data is drawn ONLY from the global TRAIN portion.
     The held-out global test set is invisible to every client.
 
     Returns:
-        train_dmatrix, test_dmatrix, num_train, num_test
+        X_train, X_test, y_train, y_test
     """
     df = load_full_dataset(data_path)
     feature_cols = _get_feature_cols(df)
@@ -176,6 +180,26 @@ def load_partition(
             X, y, test_size=test_size, random_state=random_state, stratify=y
         )
 
+    return X_train, X_test, y_train, y_test
+
+
+def load_partition(
+    partition_id: int,
+    num_partitions: int = 30,
+    strategy: str = "team",
+    test_size: float = 0.20,
+    data_path: str = None,
+    random_state: int = 42,
+) -> tuple:
+    """
+    Load training and local-evaluation data for a single federated client.
+
+    Returns:
+        train_dmatrix, test_dmatrix, num_train, num_test
+    """
+    X_train, X_test, y_train, y_test = partition_frames(
+        partition_id, num_partitions, strategy, test_size, data_path, random_state
+    )
     train_dmatrix = xgb.DMatrix(X_train, label=y_train)
     test_dmatrix  = xgb.DMatrix(X_test,  label=y_test)
 
