@@ -15,14 +15,19 @@ Run from the project root:
     python src/federated/sim_histogram.py --dp-sweep --extend --modes random --eps 1 4 --tag random_c
                                   # larger random-mode grid (T=1600, η=0.05); run for ε ∈ {1, 4}
     python src/federated/sim_histogram.py --merge   # combine all sweep parts → hist_dp_frontier.csv
+    python src/federated/sim_histogram.py --fixed --seeds 42 7 123 --tag all
+                                  # HEADLINE: one fixed config, every ε, shot- and player-level DP
+    python src/federated/sim_histogram.py --fixed --units player --eps 4 --clip-grid --seeds 42 7 123 --tag clip
 
 Outputs (results/federated/):
     hist_utility.csv, hist_curve.csv, xgb_federated_hist_team_seed<S>_model_selected.json
     hist_dp_sweep.csv          every (ε, mode, config, noise seed): val + test metrics
     hist_dp_frontier.csv       per (ε, mode): config chosen on validation, test mean ± SD over noise seeds
 
-Caveats reported with the DP numbers: the configuration for each ε is chosen on
-validation data, and that tuning step is not charged to the privacy budget.
+The headline DP numbers (--fixed → hist_dp_fixed_part_*.csv) use ONE configuration
+fixed in advance for all ε, so no tuning step touches private data; the per-ε tuned
+sweep (--dp-sweep → hist_dp_frontier.csv) chooses configs on validation data without
+charging that to the budget, and is reported only as an upper bound.
 """
 
 from __future__ import annotations
@@ -55,12 +60,18 @@ def _sigmoid(m):
 
 
 class Setup:
-    """Clients' binned local splits + pooled validation + global test, for one seed and grid."""
+    """Clients' binned local splits + pooled validation + global test, for one seed and grid.
+    The initial prediction is the PUBLIC league FG% (nothing about the teams' data is
+    released to set it); each client also keeps its shooters' names (never sent).
+    """
 
-    def __init__(self, seed: int, bin_stride: int = 1):
-        self.seed = seed
-        self.p0 = task.get_global_make_rate()
+    def __init__(self, seed: int, bin_stride: int = 1, discrete: bool = False, lattice: float = 0.0):
+        self.seed, self.discrete, self.lattice = seed, discrete, lattice
+        self.p0 = task.PUBLIC_LEAGUE_FG_PCT
         self.m0 = float(np.log(self.p0 / (1 - self.p0)))
+        self.player_teams = task.teams_per_player()
+        self.players = [task.partition_frames(pid, ev.NUM_CLIENTS, "team", random_state=seed,
+                                              return_players=True)[4] for pid in range(ev.NUM_CLIENTS)]
         self.splits = ev.client_splits("team", seed)
         self.spec = HG.BinSpec(list(self.splits[0][0].columns), bin_stride)
         _, X_va, _, y_va = ev.pooled(self.splits)
@@ -70,7 +81,9 @@ class Setup:
         self.client_bins = [(self.spec.bin(s[0]), s[2].to_numpy()) for s in self.splits]
 
     def clients(self, noise_seed: int):
-        return [HG.Client(b, y, self.m0, self.spec, seed=noise_seed * 1000 + c)
+        return [HG.Client(b, y, self.m0, self.spec, seed=noise_seed * 1000 + c,
+                          players=self.players[c], player_teams=self.player_teams,
+                          discrete=self.discrete, lattice=self.lattice)
                 for c, (b, y) in enumerate(self.client_bins)]
 
 
@@ -207,12 +220,110 @@ def merge_frontier():
                          **{f"test_{m}_mean": sel[f"test_{m}"].mean() for m in ("brier", "logloss", "auc")},
                          **{f"test_{m}_sd": sel[f"test_{m}"].std(ddof=1) for m in ("brier", "auc")}})
     frontier = pd.DataFrame(frontier).sort_values(["mode", "eps"])
+    summarize_fixed()
     frontier.to_csv(RESULTS_FED / "hist_dp_frontier.csv", index=False)
     print("\n=== DP frontier (config chosen on validation; test mean over noise seeds) ===")
     for _, r in frontier.iterrows():
         print(f"  ε={r['eps']:<5g} {r['mode']:6s}  Brier {r['test_brier_mean']:.4f} ± {r['test_brier_sd']:.4f}"
               f"  AUC {r['test_auc_mean']:.4f} ± {r['test_auc_sd']:.4f}   σ={r['sigma']:.1f}  "
               f"T={int(r['n_trees'])} depth={int(r['max_depth'])} η={r['eta']}")
+
+
+# ──────────────────────────────────────────────────────────────
+# Fixed configuration (headline): no data-dependent tuning, every release charged
+# ──────────────────────────────────────────────────────────────
+# One configuration for every ε and both privacy units, fixed before the DP runs.
+# (It is the random-mode setting the exploratory sweep favoured at ε = 2–8; the sweep
+# itself is reported separately as an unaccounted upper bound.) Player clip norms are
+# set a priori from public shot volumes, not tuned: a rotation player takes ~120 sampled
+# shots per tree, |g| ≈ 0.5 with random sign → per-leaf-vector norm ≈ 0.5·√120 ≈ 5.5;
+# h ≈ 0.24 over ~8 occupied leaves of ~15 shots → norm ≈ 0.24·√(8·15²) ≈ 10. (In the
+# data players concentrate in fewer leaves, H norms ≈ 16, so most players are scaled
+# down; --clip-grid reports the sensitivity to this choice instead of retuning it.)
+FIXED = dict(split_mode="random", n_trees=800, max_depth=4, eta=0.1, reg_lambda=10.0,
+             colsample_bytree=0.8, subsample=0.8, min_child_weight=10.0, bin_stride=4,
+             clip_g=5.0, clip_h=10.0)
+
+# Params fields written to every hist_dp_fixed_part_*.csv row. Read off the Params
+# object the run actually used, never off FIXED: FIXED is the intent, and anything
+# derived from it (player_sampling, set when dp_amplify is on at the player level)
+# would otherwise be recorded wrong. `seed` is deliberately absent — train() does
+# replace(params, seed=noise_seed) internally, so params.seed is still the default
+# here; the noise seed is recorded separately as `noise_seed`.
+RECORDED = ("split_mode", "n_trees", "max_depth", "eta", "reg_lambda", "colsample_bytree",
+            "subsample", "min_child_weight", "bin_stride", "leaf_clip", "dp_delta",
+            "clip_g", "clip_h", "dp_amplify", "player_sampling",
+            "dp_tolerated_collusion", "dp_discrete")
+
+
+def summarize_fixed():
+    """hist_dp_fixed_summary.csv: mean ± SD over noise seeds for every fixed-config cell
+    (headline = n_trees 800, η 0.1, clips 5/10; other rows are sensitivity analyses)."""
+    parts = sorted(RESULTS_FED.glob("hist_dp_fixed_part_*.csv"))
+    if not parts:
+        return
+    defaults = {"subsample": 0.8, "dp_amplify": False, "player_sampling": False,
+                "dp_tolerated_collusion": 0, "dp_discrete": False}
+    d = pd.concat([pd.read_csv(p) for p in parts])
+    for k, v in defaults.items():
+        d[k] = d[k].fillna(v) if k in d else v
+    keys = ["unit", "n_trees", "eta", "clip_g", "clip_h", "subsample", "dp_amplify",
+            "player_sampling", "dp_tolerated_collusion", "dp_discrete", "eps"]
+    d = d.drop_duplicates(keys + ["noise_seed"])
+    g = d.groupby(keys)
+    out = pd.concat([g.size().rename("n_noise_seeds"), g["sigma_g"].first(),
+                     g[["test_brier", "test_logloss", "test_auc"]].mean().add_suffix("_mean"),
+                     g[["test_brier", "test_auc"]].std(ddof=1).add_suffix("_sd")], axis=1).reset_index()
+    out["headline"] = ((out["n_trees"] == FIXED["n_trees"]) & (out["eta"] == FIXED["eta"])
+                       & (out["clip_g"] == FIXED["clip_g"]) & (out["clip_h"] == FIXED["clip_h"])
+                       & (out["subsample"] == FIXED["subsample"]) & ~out["dp_amplify"].astype(bool)
+                       & (out["dp_tolerated_collusion"] == 0) & ~out["dp_discrete"].astype(bool))
+    out.to_csv(RESULTS_FED / "hist_dp_fixed_summary.csv", index=False)
+    print("\n=== Fixed configuration (no tuning; every release charged) ===")
+    print(out[out["headline"]][["unit", "eps", "test_brier_mean", "test_auc_mean", "test_auc_sd"]].round(4).to_string(index=False))
+
+
+def _parse_value(v: str):
+    """CLI override value → bool / int / float / str."""
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+def fixed_frontier(eps_list, units, noise_seeds, tag, clips=None):
+    """Test metrics of the fixed configuration at each ε and privacy unit (final model, no
+    early stopping, no per-tree validation). `clips` overrides (clip_g, clip_h) — used only
+    for the clip-sensitivity table. FIXED may have been changed first via --override; every
+    RECORDED field is written to the output from the Params the run used, not from FIXED."""
+    setup = Setup(42, FIXED["bin_stride"], FIXED.get("dp_discrete", False),
+                  FIXED.get("dp_lattice", HG.Params.dp_lattice))
+    rows = []
+    for unit in units:
+        for cg, ch in (clips or [(FIXED["clip_g"], FIXED["clip_h"])]):
+            for eps in eps_list:
+                params = HG.Params(**{**FIXED, "clip_g": cg, "clip_h": ch}, dp_epsilon=eps, dp_unit=unit)
+                if unit == "player" and params.dp_amplify:
+                    params = replace(params, player_sampling=True)
+                for s in noise_seeds:
+                    trainer, curve = train(setup, params, noise_seed=s, curve=False)
+                    last = curve.iloc[-1]
+                    rows.append({"unit": unit, "eps": eps, "noise_seed": s,
+                                 **{k: getattr(params, k) for k in RECORDED},
+                                 "sigma_g": trainer.sigma, "sigma_h": trainer.sigma_h,
+                                 "test_brier": last["test_brier"], "test_logloss": last["test_logloss"],
+                                 "test_auc": last["test_auc"]})
+                g = pd.DataFrame(rows[-len(noise_seeds):])
+                print(f"  {unit:6s} ε={eps:<5g} clip=({cg:g},{ch:g})  Brier {g['test_brier'].mean():.4f} ± "
+                      f"{g['test_brier'].std(ddof=1):.4f}  AUC {g['test_auc'].mean():.4f} ± {g['test_auc'].std(ddof=1):.4f}"
+                      f"   σ_G={trainer.sigma:.1f}", flush=True)
+                pd.DataFrame(rows).to_csv(RESULTS_FED / f"hist_dp_fixed_part_{tag}.csv", index=False)
 
 
 def main():
@@ -227,6 +338,11 @@ def main():
     ap.add_argument("--tag", default="all", help="suffix of this sweep part (parallel runs)")
     ap.add_argument("--merge", action="store_true", help="merge sweep parts into hist_dp_frontier.csv")
     ap.add_argument("--extend", action="store_true", help="use the extended random-mode grid")
+    ap.add_argument("--fixed", action="store_true", help="headline: FIXED config at every ε (no tuning)")
+    ap.add_argument("--units", nargs="+", default=["shot", "player"], help="--fixed: privacy units")
+    ap.add_argument("--clip-grid", action="store_true", help="--fixed: player clip-norm sensitivity table")
+    ap.add_argument("--override", nargs="*", default=[], metavar="KEY=VALUE",
+                    help="--fixed: change FIXED entries, e.g. subsample=0.2 dp_amplify=true n_trees=1600")
     args = ap.parse_args()
     RESULTS_FED.mkdir(parents=True, exist_ok=True)
     if args.utility:
@@ -237,6 +353,13 @@ def main():
         dp_sweep(args.eps, args.seeds, args.modes, args.extra_seeds, args.tag)
     if args.merge:
         merge_frontier()
+    for kv in args.override:
+        k, v = kv.split("=", 1)
+        FIXED[k] = _parse_value(v)
+        print(f"  override {k} = {FIXED[k]!r}")
+    if args.fixed:
+        clips = [(2.5, 5.0), (5.0, 10.0), (10.0, 20.0)] if args.clip_grid else None
+        fixed_frontier(args.eps, args.units, args.seeds, args.tag, clips)
 
 
 if __name__ == "__main__":

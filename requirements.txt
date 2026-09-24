@@ -11,3 +11,4 @@ ydata-profiling==4.18.1
 ray==2.51.1
 pydantic==2.12.5
 tqdm==4.67.3
+pytest>=8.0

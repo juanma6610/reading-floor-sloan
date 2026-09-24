@@ -73,9 +73,6 @@ from nba_federated import dp, hardening, task                             # noqa
 from nba_federated.client_app import _build_xgb_params, _model_to_params  # noqa: E402
 
 NUM_CLIENTS = 30
-TEAM_ABBR = dict(zip(range(1610612737, 1610612767), [
-    "ATL", "BOS", "CLE", "NOP", "CHI", "DAL", "DEN", "GSW", "HOU", "LAC", "LAL", "MIA", "MIL", "MIN", "BKN",
-    "NYK", "ORL", "IND", "PHI", "PHX", "POR", "SAC", "SAS", "OKC", "TOR", "UTA", "MEM", "WAS", "DET", "CHA"]))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -211,7 +208,7 @@ def main():
     cfg = run_config()
     p0 = cfg["params.base_score"]
     lam, eta = float(cfg["params.reg_lambda"]), float(cfg["params.eta"])
-    teams = [TEAM_ABBR.get(t, str(t)) for t in task.get_team_ids()]
+    teams = task.team_abbrs()
     print(f"Prior p0 = {p0:.4f}  λ = {lam}  η = {eta}  clients = {len(args.clients)}  seed = {args.seed}\n")
 
     e1 = args.dp_epsilon[0]

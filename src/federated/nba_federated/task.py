@@ -18,6 +18,7 @@ Two important properties are preserved:
 """
 
 import pandas as pd
+import os
 import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import train_test_split, GroupShuffleSplit
@@ -34,10 +35,31 @@ GROUP_COL  = 'game_id'
 GLOBAL_TEST_SIZE = 0.15        # held-out for server-side evaluation
 RANDOM_STATE     = 42
 
-# Default data path (relative to the federated/ directory when running flwr)
-DEFAULT_DATA_PATH = Path(__file__).resolve().parents[3] / 'data' / 'shot_features_valid2_type.csv'
-if not DEFAULT_DATA_PATH.parent.exists():
-    DEFAULT_DATA_PATH = Path('/mnt/c/Users/juanm/Documents/KUL_MAI/reading-floor-sloan/data/shot_features_valid2_type.csv')
+BASE_DIR = Path(__file__).resolve().parent
+DATA_FILE = 'shot_features_valid2_type.csv'
+
+
+def _resolve_data_path() -> Path:
+    """Locate the canonical dataset.
+
+    Checked in order: $NBA_FEDERATED_DATA, then any ancestor of this file or of the
+    working directory that holds `data/<DATA_FILE>`. A Flower run executes from a
+    bundled copy of the app in ~/.flwr/apps with no data/ anywhere above it, so those
+    runs should pass `data-path` in the run config (the loaders below take it as an
+    argument) or set $NBA_FEDERATED_DATA.
+    """
+    env = os.environ.get("NBA_FEDERATED_DATA")
+    if env:
+        return Path(env)
+    for start in (Path(__file__).resolve(), Path.cwd().resolve()):
+        for parent in (start, *start.parents):
+            candidate = parent / 'data' / DATA_FILE
+            if candidate.exists():
+                return candidate
+    return Path(__file__).resolve().parents[3] / 'data' / DATA_FILE      
+
+
+DEFAULT_DATA_PATH = _resolve_data_path()
 
 # Where every federated run writes its outputs: <project>/results/federated. Derived
 # from the data path so it is right both in the repo and in Flower's bundled app copy.
@@ -126,6 +148,7 @@ def partition_frames(
     test_size: float = 0.20,
     data_path: str = None,
     random_state: int = 42,
+    return_players: bool = False,
 ) -> tuple:
     """
     A single federated client's local train / local-eval split as DataFrames.
@@ -135,6 +158,7 @@ def partition_frames(
 
     Returns:
         X_train, X_test, y_train, y_test
+        (+ players_train: shooter of each training row, if return_players; stays on the client)
     """
     df = load_full_dataset(data_path)
     feature_cols = _get_feature_cols(df)
@@ -180,7 +204,36 @@ def partition_frames(
             X, y, test_size=test_size, random_state=random_state, stratify=y
         )
 
+    if return_players:
+        return X_train, X_test, y_train, y_test, local_df.loc[X_train.index, "player_name"].to_numpy()
     return X_train, X_test, y_train, y_test
+
+
+# ──────────────────────────────────────────────────────────────
+# Public information (no private data release needed)
+# ──────────────────────────────────────────────────────────────
+# 2015-16 NBA league-average field-goal percentage (NBA.com league averages). Used as
+# the initial prediction under DP instead of the private pooled make rate (0.4485 here).
+PUBLIC_LEAGUE_FG_PCT = 0.452
+
+
+# team_id → abbreviation (public). Order follows the NBA's team ids 1610612737…66.
+TEAM_ABBR = dict(zip(range(1610612737, 1610612767), [
+    "ATL", "BOS", "CLE", "NOP", "CHI", "DAL", "DEN", "GSW", "HOU", "LAC", "LAL", "MIA", "MIL", "MIN", "BKN",
+    "NYK", "ORL", "IND", "PHI", "PHX", "POR", "SAC", "SAS", "OKC", "TOR", "UTA", "MEM", "WAS", "DET", "CHA"]))
+
+
+def team_abbrs(data_path: str = None) -> list[str]:
+    """Abbreviations of the 30 clients, in partition order."""
+    return [TEAM_ABBR.get(t, str(t)) for t in get_team_ids(data_path)]
+
+
+def teams_per_player(data_path: str = None) -> dict:
+    """How many teams each player shot for this season. This is public roster /
+    transaction information; under player-level DP a player on m teams is clipped
+    to C/m by each team, so his total contribution stays within C."""
+    df = load_full_dataset(data_path)
+    return df.groupby("player_name")["team_id"].nunique().to_dict()
 
 
 def load_partition(

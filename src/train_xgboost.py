@@ -63,6 +63,7 @@ def load_data(csv_path=DATA_PATH):
     groups = df['game_id']  # used only by GroupShuffleSplit
 
     num_makes = (y == 1).sum()
+    print(f"Number of features: {len(feature_cols)} | Number of shots: {len(df)}")
     print(f"Dataset: {len(df)} shots | {len(feature_cols)} features | {df['game_id'].nunique()} games")
     print(f"Make Rate: {(num_makes / len(df)) * 100:.1f}%")
 

@@ -38,9 +38,29 @@ histograms; the K contributions add up to N(0, σ²) on the aggregate
                          one release per tree, F = 1 (Maddock et al., CCS 2022).
 
   All split choices, min_child_weight checks and leaf values are computed from
-  the noisy aggregate, i.e. post-processing. No amplification from row
-  subsampling is claimed, so the guarantee is conservative. The unit protected
-  is one shot (event-level DP).
+  the noisy aggregate, i.e. post-processing. By default no amplification from
+  subsampling is claimed, so the guarantee is conservative; dp_amplify credits it
+  with the sampled-Gaussian accountant (Mironov et al. 2019), which is sound only
+  under secure aggregation, where the server never learns which units took part.
+  With dp_unit = "player" the amplification needs player_sampling, so that whole
+  players — the protected unit — are the ones sampled.
+
+  Unit of privacy (dp_unit):
+    "shot"    add/remove one shot (event-level DP), as above.
+    "player"  add/remove ALL of one player's shots (user-level DP; random mode).
+              Per tree, each team sums each player's (g, h) over the leaves and
+              scales both vectors by one common factor so that ||G_p|| ≤ clip_g/m
+              and ||H_p|| ≤ clip_h/m, where m is the number of teams the player
+              shot for this season (public roster information). A player's total
+              contribution is then ≤ (clip_g, clip_h) however many shots he took,
+              and his own G/H ratio (Newton step) is preserved.
+              The normalised pair (G/clip_g, H/clip_h) then has sensitivity √2:
+              σ_G = z·√2·clip_g, σ_H = z·√2·clip_h.
+
+  Everything else the server uses is public or DP: the initial prediction is the
+  PUBLIC league FG% (task.PUBLIC_LEAGUE_FG_PCT), not the teams' pooled make rate;
+  feature subsets and random tree structures come from public randomness. Under
+  DP the tree count is fixed in advance (no per-tree validation releases).
 """
 
 from __future__ import annotations
@@ -69,6 +89,17 @@ class Params:
     dp_epsilon: float = 0.0        # total ε over the whole training run; 0 disables DP
     dp_delta: float = 1e-5
     leaf_clip: float = 1.0         # |w| cap before η, applied only when DP is on
+    dp_unit: str = "shot"          # "shot" (event-level) or "player" (user-level, random mode only)
+    dp_amplify: bool = False       # credit the privacy amplification of Poisson subsampling
+                                   # (needs SecAgg: the server must not learn who took part)
+    clip_g: float = 5.0            # player-level: L2 clip of a player's per-leaf gradient sums
+    clip_h: float = 10.0           # player-level: L2 clip of a player's per-leaf hessian sums
+    player_sampling: bool = False  # sample PLAYERS (not rows) per tree — required for the
+                                   # amplification to apply at the player level
+    dp_tolerated_collusion: int = 0  # guarantee still holds if this many teams collude with the
+                                     # server or drop out: each team adds sigma/sqrt(K - c)
+    dp_discrete: bool = False      # draw the noise from the discrete Gaussian on dp_lattice·Z
+    dp_lattice: float = 2 * 8192.0 / 2 ** 22   # SecAgg+ quantisation step (clipping_range, 2^22 levels)
     seed: int = 42
 
 
@@ -152,22 +183,33 @@ class Tree:
 class Client:
     """Holds one team's binned shots and its running margin. Releases only sums."""
 
-    def __init__(self, bins: np.ndarray, y: np.ndarray, base_margin: float, spec: BinSpec, seed: int):
+    def __init__(self, bins: np.ndarray, y: np.ndarray, base_margin: float, spec: BinSpec, seed: int,
+                 players: np.ndarray | None = None, player_teams: dict | None = None,
+                 discrete: bool = False, lattice: float = 0.0):
         self.bins, self.y, self.spec = bins, np.asarray(y, float), spec
         self.margin = np.full(len(y), base_margin)
         self.rng = np.random.default_rng(seed)
         self.node = None
+        self.discrete, self.lattice = discrete, lattice
+        if players is not None:                        # player-level DP: local codes + public multiplicity
+            names, self.player_code = np.unique(players, return_inverse=True)
+            self.player_mult = np.array([(player_teams or {}).get(n, 1) for n in names], float)
 
     def gradients(self):
         p = 1.0 / (1.0 + np.exp(-self.margin))
         self.g, self.h = p - self.y, p * (1.0 - p)
 
-    def begin_tree(self, subsample: float):
+    def begin_tree(self, subsample: float, by_player: bool = False):
+        """Include each shot (or, with by_player, each player) independently w.p. `subsample`."""
         self.gradients()
-        sampled = self.rng.random(len(self.y)) < subsample
+        if by_player:
+            keep = self.rng.random(len(self.player_mult)) < subsample
+            sampled = keep[self.player_code]
+        else:
+            sampled = self.rng.random(len(self.y)) < subsample
         self.node = np.where(sampled, 0, -1)
 
-    def histograms(self, n_nodes: int, feats: np.ndarray, noise_sd: float) -> tuple[np.ndarray, np.ndarray]:
+    def histograms(self, n_nodes: int, feats: np.ndarray, sd_g: float, sd_h: float) -> tuple[np.ndarray, np.ndarray]:
         """(G, H) of shape (n_nodes, S) with S = Σ_f (m_f + 1) over `feats`, plus this client's DP share."""
         width = self.spec.n_bins[feats] + 1
         offs = np.concatenate([[0], np.cumsum(width)[:-1]])
@@ -177,10 +219,15 @@ class Client:
         k = len(feats)
         G = np.bincount(idx, weights=np.repeat(self.g[rows], k), minlength=n_nodes * S).reshape(n_nodes, S)
         H = np.bincount(idx, weights=np.repeat(self.h[rows], k), minlength=n_nodes * S).reshape(n_nodes, S)
-        if noise_sd > 0:
-            G += self.rng.normal(0.0, noise_sd, G.shape)
-            H += self.rng.normal(0.0, noise_sd / 4.0, H.shape)       # released as 4H with the same σ
+        if sd_g > 0:
+            G += self._noise(sd_g, G.shape)
+            H += self._noise(sd_h, H.shape)
         return G, H
+
+    def _noise(self, sd: float, shape):
+        if self.discrete:
+            return dp.lattice_gaussian(sd, shape, self.rng, self.lattice).reshape(shape)
+        return self.rng.normal(0.0, sd, shape)
 
     def advance(self, feat, thr, dl, left_pos, right_pos):
         """Move sampled rows from frontier positions to the next level's positions (−1 = reached a leaf)."""
@@ -192,16 +239,33 @@ class Client:
         go_left = np.where(missing, dl[k], b < thr[k])
         self.node[rows] = np.where(is_split, np.where(go_left, left_pos[k], right_pos[k]), -1)
 
-    def leaf_sums(self, tree: Tree, noise_sd: float) -> tuple[np.ndarray, np.ndarray]:
-        """Per-node (G, H) of the sampled rows' leaves (random mode), plus the DP share."""
+    def leaf_sums(self, tree: Tree, sd_g: float, sd_h: float,
+                  clip: tuple[float, float] | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Per-node (G, H) of the sampled rows' leaves (random mode), plus the DP share.
+
+        clip = (clip_g, clip_h): player-level DP — each player's per-leaf G and H vectors
+        are clipped to L2 norm clip/m (m = teams the player shot for) before summing.
+        """
         rows = np.flatnonzero(self.node >= 0)
         leaf = tree.route(self.bins[rows], self.spec.n_bins)
         n = len(tree.left)
-        G = np.bincount(leaf, weights=self.g[rows], minlength=n)
-        H = np.bincount(leaf, weights=self.h[rows], minlength=n)
-        if noise_sd > 0:
-            G += self.rng.normal(0.0, noise_sd, n)
-            H += self.rng.normal(0.0, noise_sd / 4.0, n)
+        if clip is None:
+            G = np.bincount(leaf, weights=self.g[rows], minlength=n)
+            H = np.bincount(leaf, weights=self.h[rows], minlength=n)
+        else:
+            P = len(self.player_mult)
+            idx = self.player_code[rows] * n + leaf
+            Gp = np.bincount(idx, weights=self.g[rows], minlength=P * n).reshape(P, n)
+            Hp = np.bincount(idx, weights=self.h[rows], minlength=P * n).reshape(P, n)
+            # One common factor per player keeps ||G_p|| ≤ clip_g/m and ||H_p|| ≤ clip_h/m
+            # (same sensitivity as clipping separately) while preserving the player's G/H
+            # ratio: high-volume shooters are down-weighted instead of the leaves biased.
+            ratio = np.maximum(np.linalg.norm(Gp, axis=1) / clip[0], np.linalg.norm(Hp, axis=1) / clip[1])
+            scale = np.minimum(1.0, 1.0 / np.maximum(ratio * self.player_mult, 1e-12))
+            G, H = (Gp * scale[:, None]).sum(0), (Hp * scale[:, None]).sum(0)
+        if sd_g > 0:
+            G += self._noise(sd_g, n)
+            H += self._noise(sd_h, n)
         return G, H
 
     def end_tree(self, tree: Tree):
@@ -211,17 +275,37 @@ class Client:
 # ──────────────────────────────────────────────────────────────
 # Server
 # ──────────────────────────────────────────────────────────────
-def noise_sigma(p: Params, n_features: int) -> float:
-    """σ of the noise on the AGGREGATE G (4H gets the same σ); 0 if DP is off."""
+def noise_sigmas(p: Params, n_features: int) -> tuple[float, float]:
+    """(σ_G, σ_H) of the Gaussian noise on the AGGREGATE histograms / leaf sums; (0, 0) if DP is off."""
     if p.dp_epsilon <= 0:
-        return 0.0
-    z = dp.gaussian_z_for_epsilon(p.dp_epsilon, p.dp_delta, releases_per_shot(p))
+        return 0.0, 0.0
+    z = (dp.sampled_gaussian_z_for_epsilon(p.dp_epsilon, p.dp_delta, releases_per_shot(p), p.subsample)
+         if p.dp_amplify else dp.gaussian_z_for_epsilon(p.dp_epsilon, p.dp_delta, releases_per_shot(p)))
+    if p.dp_unit == "player":
+        if p.split_mode != "random":
+            raise ValueError("player-level DP is implemented for split_mode='random' only")
+        return z * np.sqrt(2.0) * p.clip_g, z * np.sqrt(2.0) * p.clip_h
     f_released = max(1, int(round(p.colsample_bytree * n_features))) if p.split_mode == "hist" else 1
-    return z * np.sqrt(2.0 * f_released)
+    s = z * np.sqrt(2.0 * f_released)            # (G, 4H) jointly: |g| ≤ 1, 4h ≤ 1 per released feature
+    return s, s / 4.0
 
 
 def releases_per_shot(p: Params) -> int:
     return p.n_trees * (p.max_depth if p.split_mode == "hist" else 1)
+
+
+def client_noise_share(sigma: float, sigma_h: float, n_clients: int,
+                       tolerated_collusion: int = 0) -> tuple[float, float]:
+    """One team's share of the aggregate noise (σ_G, σ_H) → (sd_g, sd_h) it adds locally.
+
+    Each of K teams adds sigma/sqrt(K), so the independent shares sum to sigma on the
+    aggregate. With tolerated_collusion = c the share is sigma/sqrt(K - c) instead, so the
+    K - c teams that are neither colluding with the server (their noise is known to it) nor
+    dropped out (their noise never arrives) still carry the full sigma between them.
+
+    """
+    k = np.sqrt(max(n_clients - tolerated_collusion, 1))
+    return sigma / k, sigma_h / k
 
 
 class TreeBuilder:
@@ -334,7 +418,7 @@ class Trainer:
         self.clients, self.spec, self.p = clients, spec, params
         self.rng = np.random.default_rng(params.seed)
         self.trees: list[Tree] = []
-        self.sigma = noise_sigma(params, len(spec.features))
+        self.sigma, self.sigma_h = noise_sigmas(params, len(spec.features))
 
     def n_features_per_tree(self) -> int:
         return max(1, int(round(self.p.colsample_bytree * len(self.spec.features))))
@@ -342,20 +426,28 @@ class Trainer:
     def releases_per_shot(self) -> int:
         return releases_per_shot(self.p)
 
-    def _client_sd(self) -> float:
-        return self.sigma / np.sqrt(len(self.clients))
+    def _client_sd(self) -> tuple[float, float]:
+        """Each team's share of the noise — see client_noise_share."""
+        return client_noise_share(self.sigma, self.sigma_h, len(self.clients),
+                                  self.p.dp_tolerated_collusion)
+
+    def _clip(self):
+        return (self.p.clip_g, self.p.clip_h) if self.p.dp_unit == "player" else None
 
     def grow_tree(self) -> Tree:
         feats = np.sort(self.rng.choice(len(self.spec.features), self.n_features_per_tree(), replace=False))
+        by_player = self.p.dp_unit == "player" and self.p.player_sampling
         for c in self.clients:
-            c.begin_tree(self.p.subsample)
+            c.begin_tree(self.p.subsample, by_player)
         b = TreeBuilder(self.spec, self.p, feats, self.sigma, self.rng)
-        sd = self._client_sd()
+        sd_g, sd_h = self._client_sd()
         if self.p.split_mode == "random":
-            b.set_leaves(*map(sum, zip(*(c.leaf_sums(b.tree, sd) for c in self.clients))))
+            b.set_leaves(*map(sum, zip(*(c.leaf_sums(b.tree, sd_g, sd_h, self._clip()) for c in self.clients))))
         else:
+            if self.p.dp_unit == "player":
+                raise ValueError("player-level DP is implemented for split_mode='random' only")
             while not b.done:
-                G, H = map(sum, zip(*(c.histograms(len(b.frontier), feats, sd) for c in self.clients)))
+                G, H = map(sum, zip(*(c.histograms(len(b.frontier), feats, sd_g, sd_h) for c in self.clients)))
                 step = b.decide_level(G, H)
                 if step is not None:
                     for c in self.clients:

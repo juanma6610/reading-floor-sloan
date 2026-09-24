@@ -39,6 +39,9 @@ aggregation = "bagging"      # server-side aggregation: "bagging" or "cyclic"
                              # For the cyclic ablation, set this to "cyclic" and
                              # raise num-server-rounds to 1500 (1 tree per round,
                              # 50 visits per team) — as run_seeds.py does.
+data-path = ""               # absolute path to the shot-features CSV. Flower runs the app from
+                             # a bundled copy in ~/.flwr/apps, where the repo's data/ is not
+                             # reachable; set this (or $NBA_FEDERATED_DATA) for those runs.
 seed = 42                    # master training seed. Controls IID partitioning,
                              # local train/eval split, and XGBoost subsample RNG.
                              # The global test holdout is NOT controlled by this —
@@ -78,6 +81,14 @@ seed = 42                    # master training seed. Controls IID partitioning,
 "hist-bin-stride"         = 1        # keep every k-th public bin edge (coarser grid → less DP noise)
 "hist-leaf-clip"          = 1.0      # |leaf weight| cap before eta, DP only
 "hist-secagg"             = false    # Flower SecAgg+: the server only sees the sum over teams
+"dp-unit"                 = "shot"   # histogram DP unit: "shot" (event-level) or "player" (user-level,
+                                     # hist-split-mode = "random" only)
+"hist-clip-g"             = 5.0      # player-level: L2 clip of a player's per-leaf gradient sums
+"hist-clip-h"             = 10.0     # player-level: L2 clip of a player's per-leaf hessian sums
+"dp-amplify"              = false    # credit the amplification of Poisson subsampling (sound only with
+                                     # SecAgg+; samples players when dp-unit = "player")
+"dp-collusion"            = 0        # keep the guarantee if this many teams collude with the server or drop out
+"dp-discrete"             = false    # discrete Gaussian noise on the SecAgg+ lattice
 "hist-tag"                = ""       # output name suffix; "" → <strategy>_seed<seed>[_eps<ε>][_secagg]
 
 # ─── Differential privacy (optional; OFF by default) ───────────

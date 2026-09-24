@@ -9,9 +9,9 @@ sum_hessian, split gains and internal-node weights are sent unperturbed, from
 which leakage_attack.py recovers each team's exact shot and make counts.
 
 The natural DP upgrade to the *structural* privacy of federation: instead of
-transmitting a client's newly-trained tree(s) verbatim, clip and noise their leaf
+transmitting a client's newly trained tree(s) verbatim, clip and noise their leaf
 outputs before they leave the client, so the server sees only a
-differentially-private version of each contribution.
+differentially private version of each contribution.
 
 Two mechanisms (choose with `dp-mechanism`):
 
@@ -65,6 +65,86 @@ def gaussian_z_for_epsilon(eps: float, delta: float, rounds: int,
         else:
             hi = mid
     return hi
+
+
+# ── Renyi-DP for the POISSON-SUBSAMPLED Gaussian mechanism ───────────────────
+# Mironov, Talwar & Zhang (2019), "Renyi Differential Privacy of the Sampled
+# Gaussian Mechanism": for integer alpha >= 2, sampling rate q and noise
+# multiplier z (= sigma / sensitivity),
+#     RDP_alpha <= 1/(alpha-1) * log( sum_k C(alpha,k) (1-q)^(alpha-k) q^k e^(k(k-1)/(2 z^2)) ).
+# Clients already include each unit independently with probability q (Bernoulli =
+# Poisson sampling), so this amplification is free — provided the server never
+# learns who took part, i.e. the releases go through secure aggregation.
+_SGM_ORDERS = list(range(2, 257))
+
+
+def rdp_sampled_gaussian(q: float, z: float, alpha: int) -> float:
+    """RDP at integer order `alpha` of one subsampled Gaussian release."""
+    if z <= 0:
+        return float("inf")
+    if q >= 1.0:
+        return alpha / (2.0 * z * z)
+    if q <= 0.0:
+        return 0.0
+    terms = [math.log(math.comb(alpha, k)) + (alpha - k) * math.log1p(-q)
+             + k * math.log(q) + k * (k - 1) / (2.0 * z * z) for k in range(alpha + 1)]
+    hi = max(terms)
+    return (hi + math.log(sum(math.exp(t - hi) for t in terms))) / (alpha - 1)
+
+
+def sampled_gaussian_epsilon(q: float, z: float, rounds: int, delta: float) -> float:
+    """(eps) at fixed delta for `rounds` compositions of a q-subsampled Gaussian."""
+    if z <= 0:
+        return float("inf")
+    best = float("inf")
+    for a in _SGM_ORDERS:
+        best = min(best, rounds * rdp_sampled_gaussian(q, z, a) + math.log(1.0 / delta) / (a - 1))
+    return best
+
+
+def sampled_gaussian_z_for_epsilon(eps: float, delta: float, rounds: int, q: float,
+                                   lo: float = 1e-2, hi: float = 1e4, iters: int = 60) -> float:
+    """Smallest noise multiplier z reaching (eps, delta) over `rounds` q-subsampled rounds."""
+    if q >= 1.0:
+        return gaussian_z_for_epsilon(eps, delta, rounds)
+    if sampled_gaussian_epsilon(q, hi, rounds, delta) > eps:
+        return hi
+    for _ in range(iters):
+        mid = math.sqrt(lo * hi)
+        if sampled_gaussian_epsilon(q, mid, rounds, delta) > eps:
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+
+# ── Discrete Gaussian noise (for secure aggregation on a lattice) ────────────
+def discrete_gaussian(sigma: float, size, rng: np.random.Generator) -> np.ndarray:
+    """Exact samples from the discrete Gaussian N_Z(0, sigma^2) (Canonne, Kamath &
+    Steinke 2020, Alg. 3): propose a discrete Laplace — the difference of two
+    geometrics — and accept with prob exp(-(|Y| - sigma^2/t)^2 / (2 sigma^2)).
+
+    Secure aggregation sums integers on a lattice, and the sum of independent
+    discrete Gaussians is (very nearly) a discrete Gaussian, which is what makes
+    the distributed guarantee provable on that lattice (Kairouz et al. 2021),
+    unlike a continuous Gaussian that is quantized afterwards.
+    """
+    size = int(np.prod(size)) if np.iterable(size) else int(size)
+    t = math.floor(sigma) + 1
+    p_geom = -math.expm1(-1.0 / t)                      # 1 - exp(-1/t)
+    out = np.empty(size)
+    todo = np.arange(size)
+    while todo.size:
+        y = rng.geometric(p_geom, todo.size) - rng.geometric(p_geom, todo.size)
+        accept = rng.random(todo.size) < np.exp(-((np.abs(y) - sigma ** 2 / t) ** 2) / (2 * sigma ** 2))
+        out[todo[accept]] = y[accept]
+        todo = todo[~accept]
+    return out
+
+
+def lattice_gaussian(sigma: float, size, rng: np.random.Generator, step: float) -> np.ndarray:
+    """Discrete Gaussian of std `sigma` on the lattice `step`·Z (the SecAgg+ grid)."""
+    return step * discrete_gaussian(sigma / step, size, rng)
 
 
 def gaussian_sigma_basic(eps: float, delta: float, rounds: int, clip: float) -> float:

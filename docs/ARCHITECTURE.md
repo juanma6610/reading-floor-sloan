@@ -1,34 +1,6 @@
-# Architecture # Reading the Floor — A Portable Federated Shot Quality Model from Optical Tracking developer reference
+## Architecture developer reference
 
 Code and data for the Master's thesis of **Juan Manuel Oliver** (MSc Artificial Intelligence, Big Data Analytics, KU Leuven, 2025–26). The project builds a calibrated NBA shot-make-probability model from 2015–16 SportVU optical tracking + play-by-play data, trains it both centrally and under a cross-silo **federated learning** protocol (30 teams as clients), and derives downstream applications: **Points Over Expectation (POE)** for shooters, defenders, zones, and 5-man lineups.
-
-## Pipeline at a glance
-
-```
-allgames.txt (636 game archives)
-        │
-        ▼
-[1] clusters/ (R) ──── scrape.Rmd → shooters.Rmd / defense.Rmd
-        │              GMM soft archetypes (4 offensive + 4 defensive)
-        │              → gmm_soft_labels_15_16.csv / gmm_soft_labels_def_15_16.csv
-        ▼
-[2] src/process_batch.py ── downloads each game, runs shot_features.py
-        │                   (release-frame recovery, geometry, kinematics,
-        │                    defender pressure, spacing, tempo, archetypes)
-        │                   → data/shot_features_full.csv → …_valid2.csv
-        ▼
-[3] src/train_xgboost.py / tune_xgboost.py ── centralized XGBoost baseline
-        │                                     → data/xgb_shot_model(.tuned).json
-        ▼
-[4] src/compute_poe.py → compute_def_poe.py / correlate_poe.py
-        │                out-of-fold POE, DEF-POE, matchup heatmap,
-        │                correlations with Basketball-Reference metrics
-        ▼
-[5] src/federated/ (Flower) ── bagging/cyclic × team/IID × 5 seeds
-        │                      → results/federated/*
-        ▼
-[6] src/thesis_results.py + figures_thesis/scripts/ ── thesis tables & figures
-```
 
 ## Repository layout
 
@@ -38,14 +10,11 @@ Top level:
 |---|---|
 | `allgames.txt` | 636 SportVU game archive names (2015–16 regular season), consumed by `process_batch.py`. |
 | `requirements.txt` | Python dependencies (xgboost, flwr, scikit-learn, py7zr, …). |
-| `README.md` | This file. |
 | `src/` | Python pipeline (feature extraction → model → POE → federated). |
-| `clusters/` | R project for player-archetype clustering. |
-| `data/` | Datasets, saved models, and `data/legacy/` (superseded files). |
+| `clusters/` | R project for player archetype clustering. |
+| `data/` | Datasets, saved models |
 | `results/` | Metric tables, POE leaderboards, tuning history, and `results/federated/`. |
 | `figures/` | All generated figures (result figures + thesis figure outputs, consolidated here). |
-| `figures_thesis/` | Static thesis image assets + `scripts/` that regenerate figures into `figures/`. |
-| `docs/` | Reference material: the ydata-profiling EDA report. |
 
 ### `clusters/` — player archetype clustering (R / RStudio)
 
@@ -56,8 +25,7 @@ Standalone R project (`renv` lockfile included) that produces the soft archetype
 | `scrape.Rmd` | Scrapes NBA.com hidden stats API for player-tracking defense tables → `data/defensive_tracking.csv`. |
 | `shooters.Rmd` | Offensive archetypes: PCA + K-means + **GMM (BIC-selected K=4)** on shot-creation profile (USG, 3PAr, %Ast, FTr, FG% by zone). Outputs `shooter_archetypes_15_16.csv`, `gmm_soft_labels_15_16.csv` (Primary_Creator, Spacer, Mid-Interior, Rim_Center). |
 | `defense.Rmd` | Defensive archetypes, same method. Outputs `defender_archetypes_15_16.csv`, `gmm_soft_labels_def_15_16.csv` (Paint_Anchors, Perimeter Guards, Def_liability, Switch_Wing). |
-| `cluster_report.Rmd/.html` | Write-up of the clustering results. |
-| `data/` | Basketball-Reference exports: `ad.csv`/`pos.csv`/`shot.csv` (2015–16), `ad_14.csv`/`pos_14.csv`/`shot_14.csv` (2014–15, for skill priors), `defensive_tracking.csv`, `opp_shooting_by_zone.csv`. |
+| `data/` | Basketball-Reference exports: `ad.csv`/`pos.csv`/`shot.csv` , `ad_14.csv`/`pos_14.csv`/`shot_14.csv`, `defensive_tracking.csv`, `opp_shooting_by_zone.csv`. |
 | `pca_loadings.csv`, `gmm_*_profiles_*.csv` | Cluster interpretation artifacts. |
 
 ### `src/` — main Python pipeline
@@ -77,7 +45,6 @@ Standalone R project (`renv` lockfile included) that produces the soft archetype
 | `thesis_results.py` | One-shot generator of Results-chapter tables and figures (headline metrics vs baselines, per-zone metrics, calibration, feature importance, POE leaderboard, case-study shot charts). Reads the canonical dataset (`train_xgboost.DATA_PATH`). |
 | `plot_per_zone_poe.py` | Per-zone POE decomposition figure (Results section). Reads `results/poe_per_shot.csv`. |
 | `visualization.py` | Court drawing, frame rendering, game animation utilities (used for Figure 3.1-style renders). |
-| `spa.ipynb` | Spacing analysis notebook; also builds the lineup POE tables (`data/lineup_poe*.csv`). |
 
 ### `src/federated/` — Flower federated XGBoost
 
@@ -89,14 +56,18 @@ Standalone R project (`renv` lockfile included) that produces the soft archetype
 | `nba_federated/hardening.py` | Layer-1 defences, off by default (`harden-strip`, `public-bins` in `pyproject.toml`): zero the per-node stats prediction never reads (`sum_hessian`, `loss_changes`, internal weights), and train on a fixed public bin grid (ranges from physical limits) with thresholds snapped to it. Predictions on raw features are unchanged; public bins cost no measurable accuracy. |
 | `leakage_attack.py` | Reconstruction attack on round-1 trees: an honest-but-curious server recovers each team's exact shot and make counts per tree region (also through the leaf-only DP prototype), and — after layer-1 hardening — still each region's make rate from leaf values alone. → `leakage_attack_summary.csv`, `leakage_attack_leaves.csv`. |
 | `nba_federated/hist_gbdt.py` | **Histogram protocol** engine: all teams grow one shared tree per round from summed per-bin gradient/hessian histograms on the public grid (exactly centralized XGBoost `hist` without DP, verified to 1e-7), optional distributed Gaussian DP on the histograms (`split_mode` `hist` or data-independent `random` structure), export to a standard XGBoost booster. |
-| `nba_federated/hist_client.py`, `hist_server.py` | Flower ClientApp / ServerApp for the histogram protocol: one round per tree level, federated validation after each tree, optional SecAgg+ (`hist-secagg`) so the server only sees the sum over teams. |
+| `nba_federated/hist_client.py`, `hist_server.py` | Flower ClientApp / ServerApp for the histogram protocol: one round per tree level, federated validation after each tree, optional SecAgg+ (`hist-secagg`) so the server only sees the sum over teams, and desync detection (clients report their applied tree count; the server resends the model on a mismatch). |
 | `sim_histogram.py` | In-process runs of the histogram protocol on the 30 team silos: `--utility` (no DP) and `--dp-sweep` (privacy/utility frontier; parts merged with `--merge`) → `hist_utility.csv`, `hist_dp_frontier.csv`. |
+| `leakage_attack_hist.py` | The same reconstruction against the histogram protocol's first-tree releases: exact per-team counts in every (feature, bin) cell without SecAgg; only league figures with SecAgg+; noisy under DP; plus the formal per-team ε if SecAgg is dropped. → `leakage_attack_hist_summary.csv`. |
+| `per_team_benefit.py` | Each team scored on its own held-out shots under four models (alone / histogram protocol / bagging / centralized), with a game-level bootstrap of the federated − alone gap; teams with fewer than `--min-test-games` (default 3) held-out games are excluded from the reported stats (`included` column) → `per_team_benefit.csv`, `per_team_benefit.png`. |
+| `team_heterogeneity.py` | How non-IID the team silos are, against the IID control: make-rate spread (permutation test), per-feature Jensen-Shannon divergence on the public bins, and a train-on-one-team / score-every-team transfer matrix → `team_heterogeneity*.csv`, `team_heterogeneity.png`. |
+| `dp_audit.py` | Membership-inference audit of the released model (members = clients' train shots, non-members = their validation shots) with a Clopper-Pearson empirical-ε lower bound → `dp_audit.csv`. |
+| `plot_leakage.py` | Reconstruction figure: each team-region's true FG% against what the server recovers, as published / after stripping / under DP → `results/federated/leakage_attack.png`. |
+| `plot_privacy_utility.py` | Privacy/utility figure (AUC and Brier vs ε, shot- vs player-level DP, reference lines) → `results/federated/privacy_utility.png` (copied to `assets/`). |
 | `nba_federated/dp.py` | RDP accountant for the Gaussian mechanism (used by `hist_gbdt.py`), plus the superseded leaf-perturbation prototype for the bagging protocol, which is NOT a valid guarantee (tree structure and node statistics are sent in the clear; see `leakage_attack.py`). |
 | `pyproject.toml` | Flower app config + XGBoost hyperparameters (depth 5, eta 0.05, subsample/colsample 0.8, min_child_weight 10, λ 2.0), shared with the matched centralized baseline. |
 | `run_seeds.py` | Runs the 4 configs (bagging/cyclic × iid/team) × 5 seeds {42, 7, 123, 2024, 99}, renaming outputs per run. |
 | `evaluate_federated.py` | Produces every federated number: selects each run's round on federated validation log-loss, trains the matched centralized baseline (same params, union of client train splits) and the local-only baselines, game-level cluster bootstrap CIs → `eval_summary.csv/.tex`, `eval_per_run.csv`, `eval_curves.csv`, `federated_convergence.png`, `*_model_selected.json`. |
-| `sim_bagging.py` | Fast Flower-free simulator of bagging for config sweeps (research proxy). |
-| `dp_validation.py` | Privacy/utility sweep for the DP prototype (reads the federation cost from `eval_summary.csv`). |
 
 ### `data/` — datasets and models
 
@@ -110,15 +81,14 @@ Standalone R project (`renv` lockfile included) that produces the soft archetype
 | `xgb_shot_model_tuned.json` | Tuned centralized booster (`tune_xgboost.py`). |
 | `lineup_poe.csv`, `lineup_poe_offense.csv`, `lineup_poe_defense.csv` | 5-man lineup POE tables (built in `spa.ipynb`). |
 | `players.csv`, `pbp/` | Support lookups / sample PBP + `EVENTMSGTYPE` code reference (`pbpevents.txt`). |
-| `legacy/` | Superseded artifacts kept for reference: `shot_features.csv`, `shot_features_before_dunks.csv`, the pre-shot-type models (`xgb_shot_model*_valid2_pre20260919.json`), and the older `poe_*` copies. Git-ignored. |
 
 ### `results/` — experiment outputs
 
 Canonical POE outputs (`poe_per_shot.csv`, `poe_leaderboard.csv`), headline/per-zone metric tables, tuning history + best params, correlations with advanced metrics, and `federated/` with per-run test curves, final and validation-selected boosters, and the `eval_*` tables from `evaluate_federated.py`. Pre-2026-09-19 outputs (test-selected checkpoints) are archived in `federated_archive_pre_20260919/` and `legacy_valid2_pre20260919/`.
 
-### `figures/` and `figures_thesis/`
+### `figures/` 
 
-`figures/` is the single output directory for every generated figure (calibration, convergence, heatmaps, leaderboards, plus all thesis `build_*` outputs — PNG + PDF). `figures_thesis/` holds static image assets (broadcast stills, player photos) and `scripts/` — one `build_*.py` per thesis figure (pipeline architecture, release-frame recovery, kinematics decomposition, SHAP beeswarm, dunk anomaly, lineup leaderboards, POE time series, xFG scatter, etc.), each now writing into `figures/`.
+`figures/` is the single output directory for every generated figure (calibration, convergence, heatmaps, leaderboards, plus all thesis `build_*` outputs — PNG + PDF). 
 
 ## Reproducing the pipeline
 
@@ -144,14 +114,30 @@ PYTHONPATH=src python src/poe/correlate_poe.py
 cd src/federated
 pip install -e .
 python run_seeds.py                 # bagging/cyclic: 4 configs × 5 seeds
-flwr run . --run-config "protocol='histogram'"                      # histogram protocol in Flower
-flwr run . --run-config "protocol='histogram' hist-secagg=true"     # … with SecAgg+
+# Flower runs the app from a bundled copy in ~/.flwr/apps, where data/ is not reachable:
+# always pass data-path (or set $NBA_FEDERATED_DATA).
+D=<repo>/data/shot_features_valid2_type.csv
+flwr run . --run-config "protocol='histogram' seed=42 data-path='$D'"                   # histogram protocol
+flwr run . --run-config "protocol='histogram' hist-secagg=true seed=42 data-path='$D'"  # … with SecAgg+
+flwr run . --run-config "protocol='histogram' hist-secagg=true hist-split-mode='random' dp-epsilon=1.0 \
+    seed=42 data-path='$D'"                                                             # … + distributed DP
 cd ../..
 python src/federated/sim_histogram.py --utility --seeds 42 7 123 2024 99   # histogram protocol, 5 seeds
-python src/federated/sim_histogram.py --dp-sweep --tag all                 # DP frontier (hours; see --help)
+python src/federated/sim_histogram.py --fixed --seeds 42 7 123 --tag all  # DP headline: shot + player level
+python src/federated/sim_histogram.py --dp-sweep --tag all                 # tuned DP sweep (hours; see --help)
 python src/federated/sim_histogram.py --merge
 python src/federated/evaluate_federated.py   # every federated number, table and figure
 python src/federated/leakage_attack.py       # reconstruction attack on bagging trees
+python src/federated/leakage_attack_hist.py  # … and on the histogram protocol (± SecAgg+, ± DP)
+python src/federated/plot_leakage.py         # reconstruction figure (README / abstract)
+python src/federated/plot_privacy_utility.py # privacy/utility figure
+python src/federated/per_team_benefit.py     # per-team incentive analysis
+python src/federated/team_heterogeneity.py   # how non-IID the silos are
+python src/federated/dp_audit.py --merge     # membership-inference audit (run per setting, then merge)
+# DP variants, all via --override on the fixed config:
+#   subsample=0.2 dp_amplify=true   (subsampling amplification; needs SecAgg+)
+#   dp_tolerated_collusion=5        (guarantee survives 5 colluding/dropped teams)
+#   dp_discrete=true                (discrete Gaussian on the SecAgg+ lattice)
 
 # 6. Thesis tables/figures (retrains the canonical model + POE)
 PYTHONPATH=src python src/thesis_results.py
@@ -165,17 +151,56 @@ PYTHONPATH=src python src/thesis_results.py
 | Distance-only logistic | 0.2411 | 0.6753 | 0.595 |
 | XGBoost (full features, canonical) | 0.2042 | 0.5914 | 0.732 |
 | Matched centralized (federated params, union of client train splits) | 0.2050 | 0.5932 | 0.729 |
-| Federated — histogram protocol, team silos (5 seeds) | 0.2046 | — | 0.731 |
+| Federated — histogram protocol, team silos (5 seeds) | 0.2047 | — | 0.730 |
 | Federated — tree bagging / cyclic, 4 configs (5 seeds) | 0.2181–0.2206 | 0.624–0.631 | 0.674–0.685 |
-| Histogram protocol + distributed DP, ε = 1 / 4 (δ = 1e-5) | 0.2167 / 0.2125 | — | 0.693 / 0.707 |
+| Histogram protocol + distributed DP, shot-level, ε = 1 / 4 (δ = 1e-5, fixed config) | 0.2183 / 0.2133 | — | 0.688 / 0.704 |
+| Histogram protocol + distributed DP, player-level, ε = 8 / 16 | 0.2223 / 0.2182 | — | 0.677 / 0.690 |
 | One team alone (mean of 30) | 0.2249 | 0.6403 | 0.659 |
 
-The histogram protocol matches centralized training (relative Brier −0.2%, 95% game-level bootstrap CI [−0.5%, 0.0%]); tree bagging costs +6.4% [+5.7%, +7.0%] (team silos) to +7.7% (cyclic, IID). Team silos are not measurably worse than the IID control. Sources: `results/federated/eval_summary.csv`, `hist_dp_frontier.csv`.
+Hyperparameter tuning barely moves the centralized model: a 30-candidate random search
+(`tune_xgboost.py`, GroupKFold(5) on the same training games) reaches Brier 0.2039 / log
+loss 0.5902 / AUC 0.7325 against 0.2043 / 0.5914 / 0.7315 for the hand-set configuration —
+−0.2% relative Brier (95% game-level bootstrap CI [−0.4%, −0.0%]), AUC indistinguishable.
+The reported model stays `train_xgboost.py`'s, whose hyperparameters the federated
+protocols share; `results/best_params.json` records the search.
+
+Every team gains from joining: on its own held-out shots the histogram protocol beats a
+model trained on that team alone for every team (mean +0.062 AUC, worst +0.034; bagging +0.016),
+excluding three teams that appear in fewer than three held-out games; including them the mean is
++0.063 and all 30 still gain. The silos are heterogeneous in composition but not in the task — make rates span
+8.5 points (1.8× a random split, permutation p = 0.0005) and archetype features diverge
+~200× the IID control, while a team's own model is only +0.009 AUC better on its own shots
+than the other 29 teams' models, which is why the team partition scores like the IID control.
+
+The histogram protocol matches centralized training (relative Brier −0.2%, 95% game-level bootstrap CI [−0.4%, +0.1%]); tree bagging costs +6.4% [+5.7%, +7.0%] (team silos) to +7.7% (cyclic, IID). Team silos are not measurably worse than the IID control. The histogram protocol has been run end to end in Flower for all five seeds, not only in
+the in-process simulation (~2,000-3,300 message rounds each, one per tree level):
+Brier 0.2047 ± 0.0001 / AUC 0.7307 ± 0.0009, against 0.2047 ± 0.0002 / 0.7305 ± 0.0003 for
+the simulation, and −0.17% relative Brier [−0.39%, +0.05%] against the matched centralized
+models — the same headline either way (`hist_flower_vs_sim.csv`). Per-seed differences come
+from the client-side subsampling RNG, seeded per (team, tree, level) in the Flower client.
+Short runs match the engine exactly (max |Δp| 1e-16), and with SecAgg+ to 1e-7.
+
+Two operational notes from those runs. A Flower run executes from a bundled copy of the app
+in `~/.flwr/apps`, where the repo's `data/` is not reachable: pass `data-path` in the run
+config (or set `$NBA_FEDERATED_DATA`). And if a client's Ray actor restarts — e.g. under
+memory pressure — it loses `context.state` and would keep fitting stale residuals, which
+wrecks calibration while AUC still creeps up; clients therefore report how many trees they
+have applied, the server resends the full model on a mismatch, and the count of such events
+is written to the curve CSV (`desyncs`).
+
+Privacy extras, all measured with the same fixed config (`hist_dp_fixed_summary.csv`,
+columns `subsample`/`dp_amplify`/`dp_tolerated_collusion`/`dp_discrete`): crediting the
+Poisson subsampling the clients already do (sampled-Gaussian accountant, sound only under
+SecAgg+) gives ε = 1 shot-level AUC 0.693 instead of 0.688, and does not help at player
+level, where whole players must be sampled (0.652 vs 0.656 at ε = 4); tolerating 5 (10)
+colluding or dropped teams costs 0.002 (0.004) AUC at ε = 1; discrete-Gaussian noise on the
+SecAgg+ lattice costs nothing (0.690 vs 0.688 at ε = 1). A membership-inference audit
+(`dp_audit.csv`) gives attack AUC 0.533 and empirical ε ≥ 0.58 for the no-DP protocol,
+and ≤ 0.502 / ≈ 0 for every DP setting.
+
+DP rows use one configuration fixed for all ε (800 random-structure trees, depth 4, η 0.1, 16 bins, λ 10; player clips 5/10), the public league FG% as initial prediction and no per-tree validation, so every release is charged. Sources: `results/federated/eval_summary.csv`, `hist_dp_fixed_summary.csv` (headline + clip / tree-budget sensitivity), `hist_dp_frontier.csv` (per-ε tuned sweep, unaccounted upper bound).
 
 ## Known issues / caveats
 
 - **Legacy spacing feature.** `spatial.get_spacing_area` now returns true hull areas (`ConvexHull.volume`), but the shipped `shot_features_valid2.csv` was extracted with the old perimeter-based version (2-D `ConvexHull.area`), so its `ratio_off_def_hull` column is a perimeter ratio. Re-extract if the area semantics matter; the trained models are consistent with the shipped CSV.
-- **Dataset-count mismatch with the thesis text.** The thesis data section quotes 630 games / 97,826 shots (from `shot_features_valid.csv`); the trained models use 631 games / 97,997 shots (`shot_features_valid2_type.csv`).
-- **Shot type is not tracking-derived.** The `stype_*` flags come from the PBP scorer's description (type tokens only, never the outcome tokens). They add +0.06 AUC but reintroduce an NBA-PBP dependency; a tracking-based shot-type classifier would restore portability.
-- **Figures without a generator in this repo.** `assets/shap_beeswarm.png`, `assets/lineup_poe_leaderboard.png` and `assets/shot_heatmap_curry_lbj.png` predate the shot-type model and were not regenerated.
 - **`compute_poe.py` must run before `compute_def_poe.py`/`correlate_poe.py`** — the latter two read `results/poe_per_shot.csv` / `results/poe_leaderboard.csv`.
