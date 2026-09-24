@@ -50,12 +50,18 @@ Federated rows are the mean over five seeds, with a game level bootstrap 95% CI 
 | + SecAgg + DP, per player | ε = 8 | 0.2223 | 0.677 | +8.4% |
 | Nothing | One team's own model (mean of 30) | 0.2249 | 0.659 | +9.7% |
 
+## Visualization of the protocol
+
+<p align="center">
+  <img src="assets/hero_privacy.gif" width="94%" alt="Histogram aggregation under SecAgg+: teams bin locally, send masked noisy histograms, the masks cancel, DP noise remains, and one shared tree grows from the sum">
+  <br><sub>Every team bins its own shots and sends a <b>masked</b>, <b>noisy</b> histogram. The masks cancel in the sum, so the server only ever sees league totals — plus the noise that buys ε = 1 for every shot — and grows <b>one shared tree</b> from them.</sub>
+</p>
 
 ## Findings
 
 ### 1. Federation alone is not privacy
 
-In round 1 every shot starts from the same public prior, so the per-node statistics XGBoost ships with each tree invert exactly: a node's hessian sum gives how many shots reached it, and its gradient sum gives how many went in. The obvious hardening (strip those statistics, move split points onto a public grid) removes the counts but still leaves each region's FG% readable to within 1.4 points. The histogram protocol is no safer on its own: without secure aggregation, the server reads every team's exact shooting in all **21,017** (feature, bin) cells of the first tree. With **SecAgg+**, it only ever sees the league total.
+In round 1 every shot starts from the same public prior, so the per node statistics XGBoost ships with each tree invert exactly: a node's hessian sum gives how many shots reached it, and its gradient sum gives how many went in. The obvious hardening (strip those statistics, move split points onto a public grid) removes the counts but still leaves each region's FG% readable to within 1.4 points. The histogram protocol is no safer on its own: without secure aggregation, the server reads every team's exact shooting in all **21,017** (feature, bin) cells of the first tree. With **SecAgg+**, it only ever sees the league total.
 → [`leakage_attack.py`](src/federated/leakage_attack.py), [`leakage_attack_hist.py`](src/federated/leakage_attack_hist.py)
 
 ### 2. Protocol choice decides accuracy
@@ -126,25 +132,7 @@ An XGBoost classifier is trained on game disjoint splits and judged on **probabi
 </tr>
 </table> -->
 
-## What the calibrated probability unlocks
 
-With a trustworthy P(make), a shot's value over an average shooter in the same situation is `POE = value × (outcome − P(make))`, computed out of fold so no player is flattered by a model that trained on their own shots.
-
-<p align="center">
-  <img src="assets/per_zone_poe.png" width="85%" alt="Per-zone POE decomposition">
-  <br><sub><b>Per-zone Points Over Expectation</b> — where each player creates or gives back expected points.</sub>
-</p>
-
-<table>
-<tr>
-<td width="50%"><img src="assets/shot_heatmap_curry_lbj.png" alt="Spatial shot charts"></td>
-<td width="50%"><img src="assets/matchup_heatmap.png" alt="Archetype matchup heatmap"></td>
-</tr>
-<tr>
-<td align="center"><sub><b>Shot charts</b> — different players, different shot regimes.</sub></td>
-<td align="center"><sub><b>Archetype matchups</b> — which offensive styles beat which defensive ones.</sub></td>
-</tr>
-</table>
 
 
 ## Repository tour
@@ -178,4 +166,8 @@ docs/                     Abstract, privacy section, architecture/runbook
 **Juan Manuel Oliver** — KU Leuven · [LinkedIn](https://www.linkedin.com/in/juanma-oliver) · [Kaggle](https://www.kaggle.com/juanmaoliver)
 
 **Rafa Galvez Vizcaino** — KU Leuven, COSIC
+
+## License
+
+Code in this repository is released under the MIT License — see [LICENSE](LICENSE). The 2015–16 SportVU tracking data is not covered by it and remains subject to its own terms.
 

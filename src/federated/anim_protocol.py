@@ -99,14 +99,14 @@ class Scene:
         span = BEATS[beat + 1] - BEATS[beat]
         t = ease(min((frame - BEATS[beat]) / max(span - 6, 1), 1.0))
 
-        ax.text(3.5, 29.6, "Histogram aggregation under SecAgg+", color=TEXT, fontsize=11,
+        ax.text(3.5, 29.6, "Histogram aggregation under SecAgg+", color=TEXT, fontsize=14,
                 fontweight="bold", va="center")
         captions = ["Every team bins its own shots. Nothing leaves yet.",
                     "Each team sends a masked histogram — alone, it is noise.",
                     "The masks cancel: only the league total is revealed.",
                     "Every team also adds its 1/\u221a30 share of Gaussian noise: ε = 1 for every shot.",
                     "One shared tree grows from the noisy sum — every shot covered at ε = 1."]
-        ax.text(3.5, 26.8, captions[beat], color=MUTED, fontsize=8.5, va="center")
+        ax.text(3.5, 26.8, captions[beat], color=MUTED, fontsize=10.5, va="center")
 
         # ── the 30 teams ────────────────────────────────────────────
         for i, (x, y) in enumerate(self.silos):
@@ -114,7 +114,7 @@ class Scene:
             grown = ease(np.clip((frame - BEATS[0] - i * 0.28) / 7, 0, 1)) if beat == 0 else 1.0
             bars(ax, x + 0.45, y + 0.5, SILO_W - 0.9, (SILO_H - 1.1) * grown, self.hists[i],
                  BLUE, alpha=0.9)
-        ax.text(GRID_X0, 2.4, "30 franchises · raw shots stay home", color=MUTED, fontsize=7.5)
+        ax.text(GRID_X0, 2.4, "30 franchises · raw shots stay home", color=MUTED, fontsize=9.5)
 
         # ── packets in flight (beat 1) ──────────────────────────────
         if beat == 1:
@@ -131,12 +131,12 @@ class Scene:
                 noise = self.rng.random(NBINS)
                 fade = np.clip((1 - p) / 0.2, 0, 1)            # absorbed by the server
                 bars(ax, px - 0.9, py - 0.6, 1.8, 1.5, noise, RED, alpha=0.9 * fade)
-            ax.text(SERVER_X - 9.5, 3.4, "masked share + noise share", color=RED, fontsize=7.5)
+            ax.text(SERVER_X - 10.5, 3.4, "masked share + noise share", color=RED, fontsize=9.5)
 
         # ── the server ──────────────────────────────────────────────
         self.board(SERVER_X, SERVER_Y, SERVER_W, SERVER_H, ec=EDGE)
         ax.text(SERVER_X + SERVER_W / 2, SERVER_Y + SERVER_H - 1.6, "coordinating server",
-                color=MUTED, fontsize=7.5, ha="center", va="center")
+                color=MUTED, fontsize=9.5, ha="center", va="center")
         if beat == 0:
             shown, colour, alpha = np.zeros(NBINS), RED, 0.0   # nothing has arrived yet
         elif beat == 1:
@@ -154,14 +154,14 @@ class Scene:
         if beat >= 2:
             note = "league totals only" if beat == 2 else "league totals + DP noise  (ε = 1)"
             ax.text(SERVER_X + SERVER_W / 2, SERVER_Y + 0.9, note,
-                    color=GREEN, fontsize=7.5, ha="center", va="center")
+                    color=GREEN, fontsize=9, ha="center", va="center")
 
         # ── the shared tree ─────────────────────────────────────────
         if beat >= 4:
             self.tree(t)
         footer = ("Brier 0.2047 vs 0.2050 centralized" if beat < 3 else
                   "Brier 0.2047 no DP  ·  0.2183 at ε = 1  ·  centralized 0.2050")
-        ax.text(96.5, 2.4, footer, color=MUTED, fontsize=7.5, ha="right")
+        ax.text(96.5, 2.4, footer, color=MUTED, fontsize=9, ha="right")
 
     def tree(self, t):
         ax = self.ax
@@ -178,7 +178,7 @@ class Scene:
                     ax.plot([px, x], [y + 6.3, y], color=EDGE, lw=1.2, alpha=vis, zorder=2)
                 ax.add_patch(plt.Circle((x, y), 1.3, fc=GREEN if d else BLUE, ec=BG, lw=1.2,
                                         alpha=vis, zorder=3))
-        ax.text(TREE_X, TREE_Y + 4.4, "shared tree", color=MUTED, fontsize=7.5, ha="center")
+        ax.text(TREE_X, TREE_Y + 4.4, "shared tree", color=MUTED, fontsize=9.5, ha="center")
 
 
 def main():
