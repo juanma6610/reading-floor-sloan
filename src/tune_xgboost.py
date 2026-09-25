@@ -5,10 +5,6 @@ Random search over a focused space, scored by mean log-loss across a
 GroupKFold(5) over game_id on the trainval portion. Test set is split off
 first (game-disjoint) and never touched until the final report.
 
-Inside each fold:
-  - Fit with early stopping on the fold's validation portion.
-  - Score using the model truncated at best_iteration.
-
 Why log-loss as the search objective?
   Brier and log-loss both reward calibration; log-loss penalizes overconfident
   wrong predictions harder, which is what you want for a model whose

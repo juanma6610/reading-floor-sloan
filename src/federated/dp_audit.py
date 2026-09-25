@@ -93,10 +93,23 @@ def audit_one(setup: S.Setup, name: str, noise_seed: int, members, non_members):
         losses.append(-(y * np.log(p) + (1 - y) * np.log(1 - p)))
     score_in, score_out = -losses[0], -losses[1]          # higher score ⇒ "member"
     y_true = np.concatenate([np.ones(len(score_in)), np.zeros(len(score_out))])
+    scores = np.concatenate([score_in, score_out])
+    # Average AUC hides worst-case leakage; report the attack's true-positive rate at low
+    # false-positive rates too (Carlini et al., "Membership Inference Attacks From First
+    # Principles"), plus a bootstrap CI over shots for the AUC itself.
+    tpr_at = {}
+    for fpr in (0.001, 0.01, 0.1):
+        thr = np.quantile(score_out, 1 - fpr)
+        tpr_at[fpr] = float((score_in >= thr).mean())
+    rng = np.random.default_rng(0)
+    boot = [ev.auc(y_true[i], scores[i]) for i in
+            (rng.integers(0, len(y_true), len(y_true)) for _ in range(200))]
     return {"unit": params.dp_unit, "eps": params.dp_epsilon, "trees": params.n_trees,
             "split_mode": params.split_mode, "bin_stride": params.bin_stride, "noise_seed": noise_seed,
             "test_auc": float(curve.iloc[-1]["test_auc"]), "test_brier": float(curve.iloc[-1]["test_brier"]),
-            "mia_auc": ev.auc(y_true, np.concatenate([score_in, score_out])),
+            "mia_auc": ev.auc(y_true, scores),
+            "mia_auc_lo": float(np.percentile(boot, 2.5)), "mia_auc_hi": float(np.percentile(boot, 97.5)),
+            "tpr_at_fpr0.1pct": tpr_at[0.001], "tpr_at_fpr1pct": tpr_at[0.01], "tpr_at_fpr10pct": tpr_at[0.1],
             "mean_loss_members": float(losses[0].mean()), "mean_loss_non_members": float(losses[1].mean()),
             "eps_empirical": empirical_epsilon(score_in, score_out, params.dp_delta)}
 
@@ -146,9 +159,10 @@ def main():
             pd.DataFrame(rows).to_csv(RESULTS_FED / f"dp_audit_{args.tag}.csv", index=False)
         g = pd.DataFrame([r for r in rows if r["setting"] == name])
         print(f"  {name:10s} test AUC {g['test_auc'].mean():.4f} | MIA AUC {g['mia_auc'].mean():.4f} "
-              f"± {g['mia_auc'].std(ddof=1):.4f} | ε empirical ≥ {g['eps_empirical'].max():.3f} "
-              f"| loss members {g['mean_loss_members'].mean():.4f} vs non-members {g['mean_loss_non_members'].mean():.4f}",
-              flush=True)
+              f"[{g['mia_auc_lo'].mean():.4f}, {g['mia_auc_hi'].mean():.4f}] | ε emp ≥ {g['eps_empirical'].max():.3f}"
+              f" | TPR@FPR 0.1%/1%/10%: {g['tpr_at_fpr0.1pct'].mean():.4f}/{g['tpr_at_fpr1pct'].mean():.4f}/"
+              f"{g['tpr_at_fpr10pct'].mean():.4f} | loss {g['mean_loss_members'].mean():.4f} vs "
+              f"{g['mean_loss_non_members'].mean():.4f}", flush=True)
 
     d = pd.DataFrame(rows)
     d.to_csv(RESULTS_FED / f"dp_audit_{args.tag}.csv", index=False)

@@ -63,6 +63,7 @@ class HistClient(Client):
         rc = context.run_config
         self.pid = int(context.node_config["partition-id"])
         self.seed = int(rc.get("seed", 42))
+        self.secure_noise = bool(rc.get("dp-secure-noise", False))   # see fit(): OS entropy, not the run seed
         self.spec, self.b_tr, self.y_tr, self.b_va, self.y_va, self.players, self.player_teams = _local_data(
             self.pid, int(context.node_config["num-partitions"]), str(rc.get("strategy", "team")),
             self.seed, int(rc.get("hist-bin-stride", 1)), rc.get("data-path") or None)
@@ -108,9 +109,16 @@ class HistClient(Client):
     def fit(self, ins: FitIns) -> FitRes:
         instr = json.loads(str(ins.config["instr"]))
         self._apply_new_tree(instr)
-        # A fresh engine client per round; its RNG is seeded per (team, tree, level) → reproducible.
+        # A fresh engine client per round. By default its RNG is seeded per (team, tree, level)
+        # so a run reproduces exactly — right for experiments, WRONG for a real deployment: the
+        # run seed is public, so anyone could regenerate this team's noise and subtract it, and
+        # the subsample mask would be public too, which is the premise dp-amplify relies on.
+        # `dp-secure-noise = true` draws the seed from OS entropy instead; the run then cannot
+        # be reproduced bit-for-bit, which is the point.
+        seed = (None if self.secure_noise
+                else [self.seed, self.pid, int(instr["tree"]), int(instr.get("level", 0))])
         c = HG.Client(self.b_tr, self.y_tr, 0.0, self.spec,
-                      seed=[self.seed, self.pid, int(instr["tree"]), int(instr.get("level", 0))],
+                      seed=seed,
                       players=self.players, player_teams=self.player_teams,
                       discrete=bool(instr.get("discrete")), lattice=float(instr.get("lattice", 0.0)))
         c.margin, c.node = self.margin, self.node

@@ -316,7 +316,13 @@ def fixed_frontier(eps_list, units, noise_seeds, tag, clips=None):
                     last = curve.iloc[-1]
                     rows.append({"unit": unit, "eps": eps, "noise_seed": s,
                                  **{k: getattr(params, k) for k in RECORDED},
+                                 # sigma_* is the CALIBRATED noise the accountant priced, i.e. what
+                                 # the K - c honest teams carry between them. sigma_*_total is what
+                                 # all K teams actually put on the aggregate — larger by
+                                 # sqrt(K/(K-c)) whenever collusion is tolerated.
                                  "sigma_g": trainer.sigma, "sigma_h": trainer.sigma_h,
+                                 "sigma_g_total": trainer._client_sd()[0] * np.sqrt(len(trainer.clients)),
+                                 "sigma_h_total": trainer._client_sd()[1] * np.sqrt(len(trainer.clients)),
                                  "test_brier": last["test_brier"], "test_logloss": last["test_logloss"],
                                  "test_auc": last["test_auc"]})
                 g = pd.DataFrame(rows[-len(noise_seeds):])

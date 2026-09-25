@@ -89,15 +89,19 @@ seed = 42                    # master training seed. Controls IID partitioning,
                                      # SecAgg+; samples players when dp-unit = "player")
 "dp-collusion"            = 0        # keep the guarantee if this many teams collude with the server or drop out
 "dp-discrete"             = false    # discrete Gaussian noise on the SecAgg+ lattice
+"dp-secure-noise"         = false    # seed each client's DP noise from OS entropy instead of the run
+                                     # seed. false (default) keeps runs reproducible, which is what the
+                                     # experiments need; a REAL deployment must set it true, or the
+                                     # noise is regenerable from public values and the subsample mask
+                                     # is public (which is what dp-amplify assumes it is not).
 "hist-tag"                = ""       # output name suffix; "" → <strategy>_seed<seed>[_eps<ε>][_secagg]
 
 # ─── Differential privacy (optional; OFF by default) ───────────
 # dp-epsilon <= 0 disables DP entirely.
 # protocol = "histogram": total (dp-epsilon, dp-delta) over the whole run, Gaussian
 #   noise on the histograms split across teams (nba_federated/hist_gbdt.py). Valid.
-# protocol = "bagging": superseded leaf-noise prototype (dp-clip, dp-mechanism;
+# protocol = "bagging": superseded leaf-noise prototype (dp-clip;
 #   nba_federated/dp.py) — NOT a valid guarantee, see leakage_attack.py.
 "dp-epsilon"              = 0.0
 "dp-clip"                 = 0.3
-"dp-mechanism"           = "gaussian"  # "gaussian" (Renyi-DP accountant) or "laplace" (basic comp)
 "dp-delta"               = 1e-5        # (eps, delta)-DP target for the gaussian mechanism

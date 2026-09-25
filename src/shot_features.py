@@ -1,11 +1,10 @@
 """
 Shot Feature Extraction Pipeline
 
-Extracts, for every shot attempt in a game, 29 engineered features from
+Extracts, for every shot attempt in a game,  engineered features from
 SportVU tracking data (geometry, defender pressure, shooter/defender
 kinematics, release mechanics, tempo, spacing) plus 8 soft archetype
 probabilities (4 shooter + 4 defender) from pre-computed GMM clustering,
-for a total of 37 model features.
 """
 
 import numpy as np

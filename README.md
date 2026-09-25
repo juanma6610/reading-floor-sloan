@@ -78,7 +78,7 @@ Each team adds its share of Gaussian noise to its histograms, and secure aggrega
 - **Per player** (all of a player's shots, via per-player clipping): ε = 8 → 0.677. Below ε ≈ 2 most of the skill is gone.
 - **Secure aggregation is load-bearing.** Without it, each team's release carries only its 1/√30 share of the noise, and ε = 1 is really ε ≈ 6 against the server.
 - **Robust.** Tolerating 5 colluding or dropped teams costs 0.002 AUC. Discrete Gaussian noise on the SecAgg+ lattice, which a rigorous proof needs, costs nothing.
-- **Audited.** A membership inference attack finds the non private model memorises its training shots (attack AUC 0.533, empirical ε ≥ 0.58). Every private model sits at chance.
+- **Audited.** A membership inference attack on the non private model is reliably better than chance, but only just: AUC 0.533 [0.529, 0.538], and 1.3× chance at a 0.1% false positive rate. That is a measurable membership signal, not outright memorisation. Every private model sits at chance.
 
 <p align="center"><img src="assets/privacy_utility.png" width="95%" alt="Privacy/utility trade-off: AUC and Brier against epsilon, shot- vs player-level DP"></p>
 
@@ -157,7 +157,7 @@ docs/                     Abstract, privacy section, architecture/runbook
 
 ## Limitations
 
-- **The silos are simulated.** The 2015–16 SportVU corpus was shared league wide; it stands in for the data teams really guard.
+- **The silos are simulated.** The 2015–16 SportVU corpus was shared league wide; it is a proxy for the data teams really guard.
 - **The fixed DP configuration** matches what an exploratory sweep favoured, and the public bin ranges were set after seeing a data summary. Both would ideally be fixed from another season.
 - **Not addressed:** malicious clients poisoning their contributions, and attacks on the released model beyond membership inference.
 

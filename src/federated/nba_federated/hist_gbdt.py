@@ -111,6 +111,7 @@ class BinSpec:
 
     def __init__(self, feature_names: list[str], bin_stride: int = 1):
         self.features = list(feature_names)
+        self.bin_stride = bin_stride        # kept so Trainer can check it against Params.bin_stride
         edges = hardening.public_edges(self.features)
         self.edges = [e[::bin_stride] if bin_stride > 1 and len(e) > 8 else e for e in
                       (edges[f] for f in self.features)]
@@ -279,6 +280,15 @@ def noise_sigmas(p: Params, n_features: int) -> tuple[float, float]:
     """(σ_G, σ_H) of the Gaussian noise on the AGGREGATE histograms / leaf sums; (0, 0) if DP is off."""
     if p.dp_epsilon <= 0:
         return 0.0, 0.0
+    if p.dp_amplify and p.split_mode == "hist":
+        # begin_tree draws the subsample ONCE per tree, but hist mode releases one histogram
+        # per depth level, so the max_depth releases inside a tree share a single sampling
+        # event. The sampled-Gaussian accountant composes INDEPENDENTLY subsampled releases
+        # (Mironov et al. 2019), so charging max_depth of them per tree understates epsilon.
+        # Sound options: split_mode="random" (one release per tree), or account a whole tree
+        # as one subsampled mechanism of sensitivity sqrt(max_depth)·s.
+        raise ValueError("dp_amplify is unsound for split_mode='hist': the depth levels of a "
+                         "tree share one sampling event. Use split_mode='random'.")
     z = (dp.sampled_gaussian_z_for_epsilon(p.dp_epsilon, p.dp_delta, releases_per_shot(p), p.subsample)
          if p.dp_amplify else dp.gaussian_z_for_epsilon(p.dp_epsilon, p.dp_delta, releases_per_shot(p)))
     if p.dp_unit == "player":
@@ -415,10 +425,18 @@ class Trainer:
     """In-process orchestration (simulation). Every quantity the server reads is a sum over clients."""
 
     def __init__(self, clients: list[Client], spec: BinSpec, params: Params):
+        if spec.bin_stride != params.bin_stride:
+            raise ValueError(f"BinSpec was built on bin_stride={spec.bin_stride} but Params says "
+                             f"{params.bin_stride}; the grid the data is binned on and the grid the "
+                             f"run claims must agree.")
         self.clients, self.spec, self.p = clients, spec, params
         self.rng = np.random.default_rng(params.seed)
         self.trees: list[Tree] = []
         self.sigma, self.sigma_h = noise_sigmas(params, len(spec.features))
+        # Params is authoritative for the noise distribution: a Client built with the default
+        # continuous Gaussian still draws on the lattice when the run asks for it.
+        for c in self.clients:
+            c.discrete, c.lattice = params.dp_discrete, params.dp_lattice
 
     def n_features_per_tree(self) -> int:
         return max(1, int(round(self.p.colsample_bytree * len(self.spec.features))))
@@ -432,7 +450,10 @@ class Trainer:
                                   self.p.dp_tolerated_collusion)
 
     def _clip(self):
-        return (self.p.clip_g, self.p.clip_h) if self.p.dp_unit == "player" else None
+        """Player-level clip norms, or None. Only when DP is actually on: clipping without
+        noise just biases the leaves, so an epsilon=0 player run stays the unclipped reference."""
+        return ((self.p.clip_g, self.p.clip_h)
+                if self.p.dp_unit == "player" and self.p.dp_epsilon > 0 else None)
 
     def grow_tree(self) -> Tree:
         feats = np.sort(self.rng.choice(len(self.spec.features), self.n_features_per_tree(), replace=False))

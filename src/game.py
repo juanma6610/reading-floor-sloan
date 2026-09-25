@@ -34,12 +34,6 @@ if not os.path.exists('temp'):
 def _download_with_retry(url, dest, retries=3, backoff=2.0, verbose=True):
     """
     Download `url` to `dest`, retrying with exponential backoff.
-
-    This is the main guard against transient GitHub errors (dropped
-    connections, momentary 5xx/timeouts) silently costing a whole game
-    during a long batch run: without it, a single failed request drops
-    that game from the output entirely. Raises the last exception only
-    if every attempt fails.
     """
     last_err = None
     for attempt in range(1, retries + 1):

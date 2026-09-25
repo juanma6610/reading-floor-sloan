@@ -130,7 +130,6 @@ def make_on_fit_config_fn(run_config: dict, base_score: float, aggregation: str)
         # leaf clip bound. eps <= 0 disables DP on the client side.
         "dp-epsilon":               0.0,
         "dp-clip":                  0.3,
-        "dp-mechanism":             "gaussian",
         "dp-delta":                 1e-5,
     }
     cfg = {**defaults}
@@ -140,8 +139,14 @@ def make_on_fit_config_fn(run_config: dict, base_score: float, aggregation: str)
     # The aggregation flag is decided server-side; never let run_config override
     # it for clients (would create a mismatch with the strategy actually used).
     cfg["aggregation"] = aggregation
-    # Clients need the round count to compose the per-round epsilon.
-    cfg["dp-num-rounds"] = int(run_config.get("num-server-rounds", 50))
+    # Clients need their own RELEASE count to compose the per-round epsilon — which is not
+    # the server's round count under cyclic aggregation, where exactly one client trains per
+    # round and each is visited once every num-clients rounds. Charging all 1500 rounds to
+    # every client would over-noise by ~30x.
+    rounds = int(run_config.get("num-server-rounds", 50))
+    if aggregation == "cyclic":
+        rounds = max(1, rounds // int(run_config.get("num-clients", 30)))
+    cfg["dp-num-rounds"] = rounds
 
     def on_fit_config(server_round: int) -> dict:
         return {**cfg, "server-round": server_round}
