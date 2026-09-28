@@ -76,7 +76,7 @@ Each team adds its share of Gaussian noise to its histograms, and secure aggrega
 
 - **Per shot**: ε = 1 → AUC 0.688; ε = 4 → 0.704.
 - **Per player** (all of a player's shots, via per-player clipping): ε = 8 → 0.677. Below ε ≈ 2 most of the skill is gone.
-- **Secure aggregation is load-bearing.** Without it, each team's release carries only its 1/√30 share of the noise, and ε = 1 is really ε ≈ 6 against the server.
+- **Secure aggregation is critical to privacy guarantee** Without it, each team's release carries only its 1/√30 share of the noise, and ε = 1 is really ε ≈ 6 against the server.
 - **Robust.** Tolerating 5 colluding or dropped teams costs 0.002 AUC. Discrete Gaussian noise on the SecAgg+ lattice, which a rigorous proof needs, costs nothing.
 - **Audited.** A membership inference attack on the non private model is reliably better than chance, but only just: AUC 0.533 [0.529, 0.538], and 1.3× chance at a 0.1% false positive rate. That is a measurable membership signal, not outright memorisation. Every private model sits at chance.
 
